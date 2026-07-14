@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.png
+*.jpg
+!docs/*.png
+!docs/*.jpg

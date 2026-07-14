@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blitze — Allsky Kamera Lanzenberg</title>
+<style>
+  :root{
+    --page:#202020;--surface:#2a2a2a;--bar:#1a1a1a;--tp:#f1f1f1;--ts:#bcbcbc;--muted:#888;
+    --grid:#333;--axis:#444;--border:rgba(255,255,255,.10);--accent:#7c7cff;
+    --lig:#3fc7ff;--day:#f5c542;
+  }
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--page);
+    color:var(--tp);margin:0;padding:0 20px 56px;-webkit-font-smoothing:antialiased}
+  .topbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+    margin:0 -20px 24px;padding:13px 20px;background:var(--bar);border-bottom:1px solid var(--border)}
+  .topbar .home{color:var(--tp);text-decoration:none;font-weight:600;font-size:.94rem;white-space:nowrap}
+  .topbar .home:hover{color:var(--accent)}
+  .topbar .home .ar{color:var(--accent);margin-right:6px}
+  .topnav{margin-left:auto;display:flex;gap:5px;flex-wrap:wrap}
+  .topnav a{color:var(--ts);text-decoration:none;font-size:.84rem;padding:6px 12px;border-radius:8px}
+  .topnav a:hover{background:var(--surface);color:var(--tp)}
+  .topnav a.active{background:var(--surface);color:var(--lig);font-weight:600}
+  .wrap{max-width:960px;margin:0 auto}
+  h1{font-size:1.5rem;font-weight:650;margin:8px 0 4px;letter-spacing:-.01em}
+  .lead{margin:0 0 22px;color:var(--ts);font-size:.9rem}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:22px}
+  @media(max-width:640px){.tiles{grid-template-columns:repeat(2,1fr)}}
+  .tile{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 15px}
+  .tile .k{font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+  .tile .v{font-size:1.7rem;font-weight:650;margin-top:5px;line-height:1;color:var(--lig)}
+  .tile .u{font-size:.78rem;color:var(--ts);margin-top:4px}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px 18px 12px;margin-bottom:20px}
+  .card h2{font-size:.98rem;font-weight:600;margin:0 0 2px}
+  .card .sub{font-size:.8rem;color:var(--muted);margin:0 0 10px}
+  .card p.body{font-size:.86rem;color:var(--ts);line-height:1.5;margin:0 0 4px}
+  .scroll{overflow-x:auto}svg{display:block;width:100%;height:auto}
+  .tick,.ytick{fill:var(--muted);font-size:11px}.axl{fill:var(--ts);font-size:11px}
+  .foot{color:var(--muted);font-size:.76rem;text-align:center;margin-top:8px}
+  .empty{color:var(--muted);font-size:.85rem;padding:26px 0;text-align:center;line-height:1.55}
+  .banner{display:none;align-items:center;gap:9px;margin-bottom:18px;padding:12px 16px;
+    border-radius:12px;background:rgba(63,199,255,.12);border:1px solid var(--lig);
+    color:var(--lig);font-weight:600;font-size:.92rem}
+  .gal{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+  .gal a{display:block;text-decoration:none;color:inherit;border-radius:9px;overflow:hidden;
+    border:1px solid var(--border);background:var(--page)}
+  .gal img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#000}
+  .gal .cap{padding:6px 8px;font-size:.7rem;color:var(--ts);line-height:1.3}
+  .gal .cap b{color:var(--tp);font-weight:600}
+  .gal .cap .sh{color:var(--lig)}
+  .gal .cap .dsh{color:var(--day)}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./"><span class="ar">&larr;</span>Allsky Kamera Lanzenberg</a>
+  <nav class="topnav">
+    <a href="skyquality.html">Sky Quality</a>
+    <a href="meteors.html">Meteore</a>
+    <a href="lightning.html" class="active">Blitze</a>
+    <a href="nlc.html">Noctilucent</a>
+    <a href="aurora.html">Polarlicht</a>
+  </nav>
+</header>
+<div class="wrap">
+  <h1>Blitze</h1>
+  <p class="lead">Bei einem Gewitter schaltet die Kamera automatisch auf <b>kurze Belichtung</b> um — so bleibt ein Blitz scharf und der Himmel brennt nicht aus. Jeder erfasste Blitz landet hier.</p>
+  <div class="banner" id="banner"></div>
+  <div class="tiles" id="tiles"></div>
+
+  <div class="card">
+    <h2>Wie erfasst wird</h2>
+    <p class="body">Ein Blitz dauert nur Millisekunden und schlägt zu einem <b>zufälligen</b> Zeitpunkt ein —
+      man kann nicht auf ihn reagieren. Das Modul erkennt ein Gewitter daran, dass der Himmel
+      <b>plötzlich großflächig aufhellt</b> (Differenz zum Vorbild, nicht die absolute Helligkeit — so
+      wird ruhiges Mondlicht ignoriert). Nach mehreren solchen Aufhellungen gilt der
+      <b>Gewitter-Modus</b> als aktiv.</p>
+    <p class="body">Dann wird die nächtliche Auto-Belichtung (bis 90&nbsp;s) auf eine <b>feste Kurzbelichtung</b>
+      umgestellt und die Bildpause auf null gesetzt — maximale Einschaltdauer, damit möglichst wenige
+      Blitze in die Lücke zwischen zwei Bildern fallen. Jedes Bild mit einem echten Blitz wird
+      gespeichert; nach einer ruhigen Phase kehrt die Kamera automatisch zur normalen Belichtung zurück.</p>
+    <p class="body" style="color:var(--muted)">Ehrliche Einordnung: zwischen zwei Bildern bleibt eine kurze
+      Totzeit — ein Blitz genau in dieser Lücke wird nicht erfasst. Tagsüber (gelb markiert) ist ein Blitz
+      gegen den hellen Himmel deutlich schwerer zu fangen als nachts.</p>
+  </div>
+
+  <div class="card">
+    <h2>Blitze pro Nacht</h2>
+    <p class="sub">Erfasste Blitze je Nacht · die letzten Wochen</p>
+    <div class="scroll"><div id="chart"></div></div>
+  </div>
+
+  <div class="card">
+    <h2>Galerie</h2>
+    <p class="sub">Jeder erfasste Blitz als Vollbild · neueste zuerst · Klick öffnet das Originalbild</p>
+    <div id="gallery"></div>
+  </div>
+
+  <p class="foot" id="foot">Lädt…</p>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+// Cache-Buster: der Host liefert JSON mit 12-h-Cache-Control, sonst zeigt die Seite veraltete/leere Daten
+fetch('./lightning/lightning.json?t='+Math.floor(Date.now()/60000)).then(r=>r.ok?r.json():[]).catch(()=>[]).then(d=>render(Array.isArray(d)?d:[]));
+
+// "20260713031514" -> lokale Date
+function parseStamp(s){s=String(s);
+  return new Date(+s.slice(0,4),+s.slice(4,6)-1,+s.slice(6,8),+s.slice(8,10),+s.slice(10,12),+s.slice(12,14)||0);}
+// Nacht-Schlüssel: 12 h zurück, dann Datum → 23:xx und 03:xx derselben Nacht fallen zusammen
+function nightKey(dt){const n=new Date(dt.getTime()-12*3600*1000);
+  return n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0')+'-'+String(n.getDate()).padStart(2,'0');}
+function nightLabel(key){const [y,m,d]=key.split('-').map(Number);
+  return new Date(y,m-1,d).toLocaleDateString(undefined,{month:'short',day:'numeric'});}
+function fmtTime(dt){return String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0');}
+function fmtDate(dt){return dt.toLocaleDateString(undefined,{month:'short',day:'numeric'});}
+
+function render(rows){
+  rows=(rows||[]).filter(r=>r&&r.time);
+  rows.forEach(r=>{r._d=parseStamp(r.time);r._nk=nightKey(r._d);});
+  rows.sort((a,b)=>a._d-b._d);
+
+  const now=new Date();
+  const byNight=new Map();
+  rows.forEach(r=>{if(!byNight.has(r._nk))byNight.set(r._nk,[]);byNight.get(r._nk).push(r);});
+  const nights=[...byNight.keys()].sort();
+  const lastNight=nights.length?nights[nights.length-1]:null;
+  const lastNightRows=lastNight?byNight.get(lastNight):[];
+  const recent=rows.filter(r=>(now-r._d)<48*3600*1000);
+  const brightest=recent.reduce((m,r)=>(+r.peak>+((m&&m.peak)||-1)?r:m),null);
+
+  // Banner: letzte aktive Gewitternacht
+  const b=$('banner');
+  const lastNightIsRecent=lastNight&&lastNightRows.length&&(now-parseStamp(lastNightRows[lastNightRows.length-1].time))<20*3600*1000;
+  if(lastNightIsRecent){
+    const fb=lastNightRows.slice().sort((a,b)=>(+b.peak||0)-(+a.peak||0))[0];
+    b.style.display='flex';
+    b.innerHTML=`⚡ ${lastNightRows.length} Blitz${lastNightRows.length>1?'e':''} in der Nacht auf ${nightLabel(lastNight)} `
+      +`— stärkster um ${fmtTime(fb._d)} (Helligkeit +${+fb.peak}).`;
+  } else b.style.display='none';
+
+  $('tiles').innerHTML=[
+    ['Letzte Nacht',lastNightRows.length?String(lastNightRows.length):'—',lastNight?nightLabel(lastNight):'noch keine Daten'],
+    ['Stärkster (48 h)',brightest?('+'+(+brightest.peak)):'—',brightest?fmtDate(brightest._d)+' '+fmtTime(brightest._d):'—'],
+    ['Gewitternächte',String(nights.length),nights.length?'mit erfassten Blitzen':'noch keine'],
+    ['Gesamt erfasst',String(rows.length),'Blitze insgesamt'],
+  ].map(([k,v,u])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="u">${u}</div></div>`).join('');
+
+  drawChart(nights.slice(-21).map(k=>[k,byNight.get(k).length]));
+  drawGallery(rows.slice().reverse());
+  $('foot').textContent=`${rows.length} Blitze erfasst · ${nights.length} Gewitternächte · Aktualisierung bei jedem Gewitter`;
+}
+
+function drawChart(pairs){
+  const host=$('chart');
+  if(!pairs.length){host.innerHTML='<div class="empty">Noch keine Blitze erfasst — sobald bei einem Gewitter ein Blitz aufgezeichnet wird, erscheint hier ein Balken.</div>';return;}
+  const W=900,H=230,P={l:32,r:14,t:16,b:40},iw=W-P.l-P.r,ih=H-P.t-P.b;
+  const maxY=Math.max(3,...pairs.map(p=>p[1]));
+  const n=pairs.length,bw=iw/n,pad=Math.min(10,bw*0.22);
+  const Y=v=>P.t+(1-v/maxY)*ih;
+  let grid='',yl='';const ticks=Math.min(maxY,5);
+  for(let i=0;i<=ticks;i++){const v=Math.round(maxY*i/ticks),y=Y(v);
+    grid+=`<line x1="${P.l}" y1="${y}" x2="${W-P.r}" y2="${y}" stroke="var(--grid)"/>`;
+    yl+=`<text class="ytick" x="${P.l-7}" y="${y+3.5}" text-anchor="end">${v}</text>`;}
+  let bars='',xl='';
+  pairs.forEach(([k,c],i)=>{
+    const x=P.l+i*bw,y=Y(c),h=P.t+ih-y;
+    bars+=`<rect x="${(x+pad).toFixed(1)}" y="${y.toFixed(1)}" width="${(bw-2*pad).toFixed(1)}" height="${Math.max(0,h).toFixed(1)}" rx="2" fill="var(--lig)"/>`;
+    if(c>0)bars+=`<text class="tick" x="${(x+bw/2).toFixed(1)}" y="${(y-4).toFixed(1)}" text-anchor="middle" fill="var(--ts)">${c}</text>`;
+    if(n<=14||i%2===0)xl+=`<text class="tick" x="${(x+bw/2).toFixed(1)}" y="${H-P.b+16}" text-anchor="middle">${nightLabel(k)}</text>`;
+  });
+  host.innerHTML=`<svg viewBox="0 0 ${W} ${H}">${grid}
+    <line x1="${P.l}" y1="${P.t+ih}" x2="${W-P.r}" y2="${P.t+ih}" stroke="var(--axis)"/>${yl}${xl}
+    <text class="axl" x="${P.l}" y="${P.t-4}">Blitze</text>${bars}</svg>`;
+}
+
+function drawGallery(list){
+  const host=$('gallery');
+  if(!list.length){
+    host.innerHTML='<div class="empty">Noch keine Blitze aufgezeichnet. Sobald bei einem Gewitter ein Blitz erfasst wird, erscheint hier sein Bild. Die Seite ist bereit.</div>';
+    return;}
+  host.innerHTML='<div class="gal">'+list.slice(0,60).map(r=>{
+    const thumb=`./lightning/thumbnails/${r.file}`,full=`./lightning/${r.file}`;
+    const day=String(r.period).toLowerCase()==='day';
+    return `<a href="${full}" target="_blank"><img src="${thumb}" loading="lazy" alt="Blitz">
+      <div class="cap"><b>${fmtDate(r._d)} ${fmtTime(r._d)}</b> · <span class="${day?'dsh':'sh'}">${day?'Tag':'Nacht'}</span>`
+      +`${r.peak!=null?` · Helligkeit +${+r.peak}`:''}</div></a>`;
+  }).join('')+'</div>';
+}
+</script>
+</body>
+</html>
