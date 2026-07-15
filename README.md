@@ -72,9 +72,10 @@ keep drifting clouds from arming the detector.
 no API key, worldwide) against the camera's latitude/longitude. It **refines** the optical
 trigger, it never replaces it:
 
-- **Daytime arming** is blocked while the sky is confidently calm/clear, so drifting
-  daytime clouds cannot arm the detector. Night stays pure-optical — the optical trigger
-  is what actually catches the bolt, and it is trusted and fast.
+- **Arming is blocked** — day *and* night — while the sky is confidently calm/clear
+  (dry/fog), so drifting clouds and the fast brightness swings of twilight/moonlit clouds
+  cannot false-arm the detector on a night with no storm. A real storm never reads as
+  calm (it reports rain/thunderstorm), so genuine storms still arm optically.
 - **The cooldown is shortened** (to `weather_clear_cooldown_sec`) once the sky is
   confidently calm, so the camera resets sooner after a storm has clearly moved on.
 - **Fail-open:** any lookup error or missing coordinates makes the module behave exactly
@@ -84,6 +85,16 @@ trigger, it never replaces it:
 Because the optical trigger stays authoritative for *staying* armed, a lagging weather
 reading that wrongly says "calm" mid-storm still cannot cut a storm short while bolts are
 actually being seen — it only shortens the *quiet* timeout.
+
+## Sun-elevation guard
+
+`min_sun_elevation` (default `-6` = end of civil twilight) is an independent backstop:
+the storm mode will **not arm while the sun is higher than this elevation**. A brightness
+trigger simply cannot work against a bright, fast-changing twilight sky — the ramp and
+sunlit clouds swamp any real bolt, and you cannot get a crisp bolt against a bright sky
+anyway. This covers the case where the weather lookup is unavailable/stale (which fails
+open). It uses the camera's latitude/longitude (NOAA solar-position math, no extra
+library); if the coordinates are missing it never blocks.
 
 ## Installation
 
@@ -106,8 +117,9 @@ sky to analyse, black = trees/horizon.
 | `lightning_exposure_ms` / `lightning_gain` / `lightning_delay_ms` | the fixed **night** capture in lightning mode (all exposures in **milliseconds**) |
 | `bolt_delta` / `bolt_min_area` | threshold for a frame to be *saved* as a bolt |
 | `day_enabled` | also detect/save on the day flow (capture-only) |
-| `weather_gate` | cross-check Open-Meteo: block daytime arming when the sky is calm + reset sooner after a storm |
+| `weather_gate` | cross-check Open-Meteo: block arming (day + night) when the sky is calm + reset sooner after a storm |
 | `weather_cache_sec` / `weather_clear_cooldown_sec` | how often the weather API is queried / the shortened cooldown used when the sky is confidently calm |
+| `min_sun_elevation` | never arm while the sun is above this elevation (deg; `-6` = end of civil twilight) |
 
 ## Honest limitations
 

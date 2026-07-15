@@ -42,6 +42,7 @@ import allsky_shared as s
 import os
 import json
 import time
+import math
 import subprocess
 import urllib.request
 import cv2
@@ -50,7 +51,7 @@ import numpy as np
 metaData = {
     "name": "Lightning Capture",
     "description": "Detects thunderstorms from brightness transients and switches to short exposures to capture crisp lightning bolts",
-    "version": "v0.6.0",
+    "version": "v0.7.0",
     "events": [
         "day",
         "night"
@@ -76,6 +77,7 @@ metaData = {
         "weather_gate": "false",
         "weather_cache_sec": "600",
         "weather_clear_cooldown_sec": "120",
+        "min_sun_elevation": "-6.0",
         "outputdir": "",
         "save_debug": "false",
         "debug": "false"
@@ -189,6 +191,12 @@ metaData = {
             "help": "Shortened cooldown used while the weather service reports a confidently calm/clear sky (only when the Weather Gate is on). Lets the camera reset much sooner than the full Cooldown once a storm has clearly passed.",
             "type": {"fieldtype": "spinner", "min": 30, "max": 1800, "step": 30}
         },
+        "min_sun_elevation": {
+            "required": "false",
+            "description": "Min Sun Elevation (deg)",
+            "help": "The storm mode will not arm while the sun is higher than this elevation (degrees; -6 = end of civil twilight). A brightness trigger cannot work against a bright, fast-changing twilight sky, so this blocks false arming at dusk/dawn even if the weather lookup is unavailable. Uses the camera latitude/longitude; if those are missing it never blocks.",
+            "type": {"fieldtype": "spinner", "min": -18, "max": 10, "step": 1}
+        },
         "outputdir": {
             "required": "false",
             "description": "Output Folder",
@@ -271,6 +279,48 @@ def _parseLatLon(v):
         v = str(v).strip()
         sign = -1 if v[-1:].upper() in ("S", "W") else 1
         return sign * float(v.rstrip("NSEWnsew ").strip())
+    except Exception:
+        return None
+
+
+def _sunElevation(lat, lon, t_epoch):
+    """Solar elevation in degrees at (lat, lon) for a Unix timestamp, using the NOAA
+    solar-position formulas (no external library). lon is east-positive.
+
+    Returns the elevation in degrees, or None if the location is missing - callers
+    treat None as 'unknown' and never block on it (fail-open, like the weather gate)."""
+    if lat is None or lon is None:
+        return None
+    try:
+        jd = t_epoch / 86400.0 + 2440587.5
+        T = (jd - 2451545.0) / 36525.0
+        L0 = (280.46646 + T * (36000.76983 + T * 0.0003032)) % 360.0
+        M = 357.52911 + T * (35999.05029 - 0.0001537 * T)
+        e = 0.016708634 - T * (0.000042037 + 0.0000001267 * T)
+        Mr = math.radians(M)
+        C = (math.sin(Mr) * (1.914602 - T * (0.004817 + 0.000014 * T))
+             + math.sin(2 * Mr) * (0.019993 - 0.000101 * T)
+             + math.sin(3 * Mr) * 0.000289)
+        true_long = L0 + C
+        omega = 125.04 - 1934.136 * T
+        lam = true_long - 0.00569 - 0.00478 * math.sin(math.radians(omega))
+        eps0 = 23.0 + (26.0 + ((21.448 - T * (46.815 + T * (0.00059 - T * 0.001813)))) / 60.0) / 60.0
+        eps = eps0 + 0.00256 * math.cos(math.radians(omega))
+        epsr = math.radians(eps)
+        decl = math.asin(math.sin(epsr) * math.sin(math.radians(lam)))
+        y = math.tan(epsr / 2.0) ** 2
+        L0r = math.radians(L0)
+        eot = 4.0 * math.degrees(
+            y * math.sin(2 * L0r) - 2 * e * math.sin(Mr)
+            + 4 * e * y * math.sin(Mr) * math.cos(2 * L0r)
+            - 0.5 * y * y * math.sin(4 * L0r)
+            - 1.25 * e * e * math.sin(2 * Mr))
+        tst = ((t_epoch % 86400.0) / 60.0 + eot + 4.0 * lon) % 1440.0
+        ha = math.radians(tst / 4.0 - 180.0)
+        latr = math.radians(lat)
+        cosz = math.sin(latr) * math.sin(decl) + math.cos(latr) * math.cos(decl) * math.cos(ha)
+        cosz = max(-1.0, min(1.0, cosz))
+        return 90.0 - math.degrees(math.acos(cosz))
     except Exception:
         return None
 
@@ -458,6 +508,7 @@ def lightning(params, event):
     weather_gate = _truthy(params.get("weather_gate", False))
     weather_cache_sec = s.asfloat(params.get("weather_cache_sec", 600))
     weather_clear_cooldown_sec = s.asfloat(params.get("weather_clear_cooldown_sec", 120))
+    min_sun_elevation = s.asfloat(params.get("min_sun_elevation", -6.0))
 
     # Daytime capture with a brightness trigger is hopeless - the bright sky and drifting
     # clouds swamp any bolt (they get saved as false "sunshine bolts"). So unless
@@ -507,6 +558,19 @@ def lightning(params, event):
         wx_condition = _getWeatherCondition(lat, lon, weather_cache_sec)
         wx_calm = wx_condition in _CALM_CONDITIONS
 
+    # --- sun-elevation guard (independent backstop, fail-open) ---------------
+    # A brightness-transient trigger cannot work while the sky itself is bright and
+    # changing fast: the twilight ramp and sunlit clouds swamp any real bolt, and you
+    # cannot get a crisp bolt against a bright sky anyway. So refuse to arm until the sun
+    # is safely below the horizon (min_sun_elevation, default -6 deg = end of civil
+    # twilight). This backstops the weather gate for the case where the weather lookup is
+    # unavailable/stale (which fails open). Unknown location -> None -> never blocks.
+    sun_elev = None
+    if is_flash or state["active"]:
+        sun_elev = _sunElevation(_parseLatLon(s.getSetting("latitude")),
+                                 _parseLatLon(s.getSetting("longitude")), now)
+    too_bright = sun_elev is not None and sun_elev > min_sun_elevation
+
     # --- arming state machine (period-independent) ---------------------------
     # Weather gate, effect 1: don't let optical flashes arm the storm mode while the
     # weather service reports a confidently calm/clear sky (dry/fog) - day OR night.
@@ -514,7 +578,8 @@ def lightning(params, event):
     # moonlit clouds from false-arming on a night when there is no storm. A real storm
     # never reads as calm (it reports rain/thunderstorm), so genuine night storms still
     # arm optically. Unknown weather (None) never blocks (fail-open).
-    arm_blocked = weather_gate and wx_calm
+    # Plus the sun-elevation guard above: never arm while the sun is above the threshold.
+    arm_blocked = (weather_gate and wx_calm) or too_bright
     # Weather gate, effect 2: a confidently calm sky shortens the cooldown, so the
     # camera resets much sooner once a storm has clearly moved on.
     eff_cooldown = weather_clear_cooldown_sec if (weather_gate and wx_calm) else cooldown_sec
@@ -594,6 +659,7 @@ def lightning(params, event):
             "AS_LIGHTNING_MODE": "ON" if state["active"] else "OFF",
             "AS_LIGHTNING_FLASHES": flashes_in_window,
             "AS_LIGHTNING_WX": (wx_condition or "n/a") if weather_gate else "off",
+            "AS_LIGHTNING_SUN": (round(sun_elev, 1) if sun_elev is not None else "n/a"),
         })
     except Exception:
         pass

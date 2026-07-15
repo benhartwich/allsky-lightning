@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.7.0
+
+- **Sun-elevation guard (`min_sun_elevation`, default -6°).** An independent backstop to
+  the weather gate: the storm mode will not arm while the sun is higher than this
+  elevation. A brightness trigger cannot work against a bright, fast-changing twilight
+  sky, so this blocks false arming at dusk/dawn even when the weather lookup is
+  unavailable or stale (which fails open). Uses the camera latitude/longitude with NOAA
+  solar-position math (no extra library); if the coordinates are missing it never blocks.
+  The current sun elevation is exposed to the overlay as `AS_LIGHTNING_SUN`.
+
 ## v0.6.0
 
 - **Fix: the weather gate now blocks false arming at night, not just during the day.**
