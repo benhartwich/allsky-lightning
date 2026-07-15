@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Top-Blitze — Allsky Kamera Lanzenberg</title>
+<style>
+  :root{
+    --page:#202020;--surface:#2a2a2a;--bar:#1a1a1a;--tp:#f1f1f1;--ts:#bcbcbc;--muted:#888;
+    --grid:#333;--axis:#444;--border:rgba(255,255,255,.10);--accent:#7c7cff;
+    --lig:#3fc7ff;--day:#f5c542;--gold:#f5c542;
+  }
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--page);
+    color:var(--tp);margin:0;padding:0 20px 56px;-webkit-font-smoothing:antialiased}
+  .topbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+    margin:0 -20px 24px;padding:13px 20px;background:var(--bar);border-bottom:1px solid var(--border)}
+  .topbar .home{color:var(--tp);text-decoration:none;font-weight:600;font-size:.94rem;white-space:nowrap}
+  .topbar .home:hover{color:var(--accent)}
+  .topbar .home .ar{color:var(--accent);margin-right:6px}
+  .topnav{margin-left:auto;display:flex;gap:5px;flex-wrap:wrap}
+  .topnav a{color:var(--ts);text-decoration:none;font-size:.84rem;padding:6px 12px;border-radius:8px}
+  .topnav a:hover{background:var(--surface);color:var(--tp)}
+  .topnav a.active{background:var(--surface);color:var(--lig);font-weight:600}
+  .wrap{max-width:960px;margin:0 auto}
+  h1{font-size:1.5rem;font-weight:650;margin:8px 0 4px;letter-spacing:-.01em}
+  .lead{margin:0 0 22px;color:var(--ts);font-size:.9rem}
+  .foot{color:var(--muted);font-size:.76rem;text-align:center;margin-top:18px}
+  .empty{color:var(--muted);font-size:.85rem;padding:26px 0;text-align:center;line-height:1.55}
+  /* Hero: der stärkste Blitz */
+  .hero{position:relative;border-radius:16px;overflow:hidden;border:1px solid var(--border);
+    background:#000;margin-bottom:20px;display:block;text-decoration:none;color:inherit}
+  .hero img{width:100%;display:block;aspect-ratio:16/9;object-fit:cover;background:#000}
+  .hero .ov{position:absolute;left:0;right:0;bottom:0;padding:34px 18px 14px;
+    background:linear-gradient(transparent,rgba(0,0,0,.82));display:flex;align-items:flex-end;
+    justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .hero .ttl{font-size:1.05rem;font-weight:650}
+  .hero .ttl small{display:block;font-weight:400;color:var(--ts);font-size:.82rem;margin-top:3px}
+  .hero .badge{background:var(--gold);color:#181818;font-weight:700;font-size:.74rem;
+    padding:4px 10px;border-radius:20px;white-space:nowrap}
+  .stats{display:flex;gap:14px;flex-wrap:wrap}
+  .stats .s{font-size:.8rem;color:var(--ts)}
+  .stats .s b{color:var(--lig);font-weight:650}
+  /* gerankte Galerie */
+  .gal{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
+  .gal a{position:relative;display:block;text-decoration:none;color:inherit;border-radius:10px;
+    overflow:hidden;border:1px solid var(--border);background:var(--page)}
+  .gal img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#000}
+  .gal .rk{position:absolute;top:7px;left:7px;background:rgba(0,0,0,.66);color:var(--gold);
+    font-weight:700;font-size:.72rem;padding:2px 8px;border-radius:20px;backdrop-filter:blur(2px)}
+  .gal .cap{padding:6px 8px;font-size:.7rem;color:var(--ts);line-height:1.35}
+  .gal .cap b{color:var(--tp);font-weight:600}
+  .gal .cap .sh{color:var(--lig)}.gal .cap .dsh{color:var(--day)}
+  .note{font-size:.82rem;color:var(--muted);margin:2px 0 20px;line-height:1.5}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./"><span class="ar">&larr;</span>Allsky Kamera Lanzenberg</a>
+  <nav class="topnav">
+    <a href="skyquality.html">Sky Quality</a>
+    <a href="meteors.html">Meteore</a>
+    <a href="lightning.html">Blitze</a>
+    <a href="lightning-best.html" class="active">Top-Blitze</a>
+    <a href="nlc.html">Noctilucent</a>
+    <a href="aurora.html">Polarlicht</a>
+  </nav>
+</header>
+<div class="wrap">
+  <h1>Top-Blitze</h1>
+  <p class="lead">Die <b>stärksten</b> automatisch erfassten Blitze — gereiht nach Intensität
+    (erfasste Blitzfläche&nbsp;×&nbsp;Spitzenhelligkeit). Ein Auszug der eindrucksvollsten Aufnahmen
+    aus der vollständigen <a href="lightning.html" style="color:var(--lig)">Galerie</a>.</p>
+  <div id="hero"></div>
+  <div class="note" id="note"></div>
+  <div id="gallery"></div>
+  <p class="foot" id="foot">Lädt…</p>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+// Cache-Buster: der Host liefert JSON mit 12-h-Cache-Control
+fetch('./lightning/best.json?t='+Math.floor(Date.now()/60000))
+  .then(r=>r.ok?r.json():[]).catch(()=>[]).then(d=>render(Array.isArray(d)?d:[]));
+
+function parseStamp(s){s=String(s);
+  return new Date(+s.slice(0,4),+s.slice(4,6)-1,+s.slice(6,8),+s.slice(8,10),+s.slice(10,12),+s.slice(12,14)||0);}
+function fmtDate(dt){return dt.toLocaleDateString(undefined,{month:'short',day:'numeric'});}
+function fmtTime(dt){return String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0');}
+function km2(n){return (+n).toLocaleString('de-DE');}
+
+function render(rows){
+  rows=(rows||[]).filter(r=>r&&r.time).sort((a,b)=>(a.rank||99)-(b.rank||99));
+  if(!rows.length){
+    $('hero').innerHTML='<div class="empty">Noch keine Top-Blitze — sobald bei einem Gewitter Blitze erfasst wurden, erscheinen hier die stärksten.</div>';
+    $('foot').textContent='';return;}
+  const top=rows[0],dt=parseStamp(top.time),day=String(top.period).toLowerCase()==='day';
+  $('hero').innerHTML=
+    `<a class="hero" href="./lightning/${top.file}" target="_blank">
+       <img src="./lightning/${top.file}" alt="Stärkster Blitz">
+       <div class="ov">
+         <div><span class="badge">★ Stärkster Blitz</span>
+           <div class="ttl" style="margin-top:8px">${fmtDate(dt)} · ${fmtTime(dt)} Uhr
+             <small>${day?'Tag':'Nacht'} · Fläche ${km2(top.area)} px · Helligkeit +${+top.peak}</small></div></div>
+       </div></a>`;
+  const dates=[...new Set(rows.map(r=>fmtDate(parseStamp(r.time))))];
+  $('note').textContent=`Auswahl der ${rows.length} intensivsten Blitze`+
+    (dates.length?` (${dates.join(', ')})`:'')+` · Klick öffnet das Originalbild in voller Auflösung.`;
+  drawGallery(rows.slice(1));
+  $('foot').textContent=`Top ${rows.length} von allen erfassten Blitzen · gereiht nach Intensität`;
+}
+
+function drawGallery(list){
+  const host=$('gallery');
+  if(!list.length){host.innerHTML='';return;}
+  host.innerHTML='<div class="gal">'+list.map(r=>{
+    const dt=parseStamp(r.time),day=String(r.period).toLowerCase()==='day';
+    return `<a href="./lightning/${r.file}" target="_blank">
+      <span class="rk">#${r.rank}</span>
+      <img src="./lightning/thumbnails/${r.file}" loading="lazy" alt="Blitz #${r.rank}">
+      <div class="cap"><b>${fmtDate(dt)} ${fmtTime(dt)}</b> · <span class="${day?'dsh':'sh'}">${day?'Tag':'Nacht'}</span>`
+      +` · Helligkeit +${+r.peak}</div></a>`;
+  }).join('')+'</div>';
+}
+</script>
+</body>
+</html>

@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.4.0
+
+- **Optional weather gate (Open-Meteo, free, no API key, worldwide).** Off by default.
+  The pure-software optical trigger stays primary; the weather service only refines it:
+  - **Daytime arming** is blocked while the service reports a confidently calm/clear sky,
+    so drifting daytime clouds can no longer arm the detector. Night stays pure-optical.
+  - **The cooldown is shortened** (to `weather_clear_cooldown_sec`, default 120 s) once the
+    sky is confidently calm, so the camera resets much sooner after a storm has moved on.
+  - **Fail-open:** any lookup error / missing coordinates → the module behaves exactly as
+    if the gate were off, so the network can never leave the camera stuck. Readings are
+    cached (`weather_cache_sec`, default 600 s) so the API is never hit in the hot path.
+  - Uses Open-Meteo rather than a Germany-only source because the camera site is in
+    Austria; the current WMO weather code is mapped to dry/fog/rain/snow/thunderstorm.
+
+## v0.3.0
+
+- **Exposure is now restored from any flow, not just the night flow.** Previously the
+  short-exposure override was only undone on a night frame, so a storm that kept going
+  past dawn left the night exposure overridden until the *next* real night — hours later.
+  Entering lightning mode stays night-only (only the night exposure is ever touched), but
+  the restore now fires from the day flow too, so the camera resets as soon as the
+  cooldown elapses regardless of the time of day.
+
 ## v0.2.0
 
 - **Difference-based trigger** instead of absolute brightness: a flash is a sudden

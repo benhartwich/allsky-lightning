@@ -66,6 +66,25 @@ long-exposure wash-out to fix). Treat it as best-effort. Because the default day
 between frames is large, the daytime duty cycle is low — raise `flash_min_area` there to
 keep drifting clouds from arming the detector.
 
+## Weather gate (optional)
+
+`weather_gate` cross-checks a free weather service ([Open-Meteo](https://open-meteo.com),
+no API key, worldwide) against the camera's latitude/longitude. It **refines** the optical
+trigger, it never replaces it:
+
+- **Daytime arming** is blocked while the sky is confidently calm/clear, so drifting
+  daytime clouds cannot arm the detector. Night stays pure-optical — the optical trigger
+  is what actually catches the bolt, and it is trusted and fast.
+- **The cooldown is shortened** (to `weather_clear_cooldown_sec`) once the sky is
+  confidently calm, so the camera resets sooner after a storm has clearly moved on.
+- **Fail-open:** any lookup error or missing coordinates makes the module behave exactly
+  as if the gate were off — it can never leave the camera stuck. Readings are cached
+  (`weather_cache_sec`) so the API is never called in the per-frame hot path.
+
+Because the optical trigger stays authoritative for *staying* armed, a lagging weather
+reading that wrongly says "calm" mid-storm still cannot cut a storm short while bolts are
+actually being seen — it only shortens the *quiet* timeout.
+
 ## Installation
 
 1. Copy `allsky_lightning.py` into `~/allsky/scripts/modules/`.
@@ -87,6 +106,8 @@ sky to analyse, black = trees/horizon.
 | `lightning_exposure_ms` / `lightning_gain` / `lightning_delay_ms` | the fixed **night** capture in lightning mode (all exposures in **milliseconds**) |
 | `bolt_delta` / `bolt_min_area` | threshold for a frame to be *saved* as a bolt |
 | `day_enabled` | also detect/save on the day flow (capture-only) |
+| `weather_gate` | cross-check Open-Meteo: block daytime arming when the sky is calm + reset sooner after a storm |
+| `weather_cache_sec` / `weather_clear_cooldown_sec` | how often the weather API is queried / the shortened cooldown used when the sky is confidently calm |
 
 ## Honest limitations
 

@@ -43,13 +43,14 @@ import os
 import json
 import time
 import subprocess
+import urllib.request
 import cv2
 import numpy as np
 
 metaData = {
     "name": "Lightning Capture",
     "description": "Detects thunderstorms from brightness transients and switches to short exposures to capture crisp lightning bolts",
-    "version": "v0.2.0",
+    "version": "v0.4.0",
     "events": [
         "day",
         "night"
@@ -72,6 +73,9 @@ metaData = {
         "bolt_delta": "40",
         "bolt_min_area": "60",
         "upload_remote": "true",
+        "weather_gate": "false",
+        "weather_cache_sec": "600",
+        "weather_clear_cooldown_sec": "120",
         "outputdir": "",
         "save_debug": "false",
         "debug": "false"
@@ -167,6 +171,24 @@ metaData = {
             "help": "If the remote website is enabled, upload each saved bolt image + thumbnail + the lightning.json index to it (folder 'lightning').",
             "type": {"fieldtype": "checkbox"}
         },
+        "weather_gate": {
+            "required": "false",
+            "description": "Weather Gate (Open-Meteo)",
+            "help": "Cross-check a free weather service (Open-Meteo, no API key, worldwide) using the camera's latitude/longitude. Two effects: (1) DAYTIME arming is blocked while the service reports a confidently calm/clear sky, so drifting daytime clouds can't arm the detector; (2) the cooldown is shortened to 'Weather Clear Cooldown' once the sky is confidently calm, so the camera resets sooner after a storm has clearly moved on. Night stays pure-optical. Fail-open: if the lookup fails the module behaves exactly as if this were off.",
+            "type": {"fieldtype": "checkbox"}
+        },
+        "weather_cache_sec": {
+            "required": "false",
+            "description": "Weather Cache (s)",
+            "help": "How long a weather reading is reused before the service is queried again. The API is hit at most this often (default 600 s = 10 min), so it never slows the capture loop.",
+            "type": {"fieldtype": "spinner", "min": 120, "max": 3600, "step": 60}
+        },
+        "weather_clear_cooldown_sec": {
+            "required": "false",
+            "description": "Weather Clear Cooldown (s)",
+            "help": "Shortened cooldown used while the weather service reports a confidently calm/clear sky (only when the Weather Gate is on). Lets the camera reset much sooner than the full Cooldown once a storm has clearly passed.",
+            "type": {"fieldtype": "spinner", "min": 30, "max": 1800, "step": 30}
+        },
         "outputdir": {
             "required": "false",
             "description": "Output Folder",
@@ -192,6 +214,27 @@ metaData = {
 _maskCache = {"name": None, "soft": None, "hard": None}
 STATE_FILE = os.path.join(s.ALLSKY_TMP, "allsky_lightning_state.json")
 PREV_FRAME = os.path.join(s.ALLSKY_TMP, "allsky_lightning_prev.png")
+WEATHER_FILE = os.path.join(s.ALLSKY_TMP, "allsky_lightning_weather.json")
+
+# Open-Meteo: free, no API key, worldwide (the site is in Austria, so a Germany-only
+# source like DWD/Bright Sky has no nearby station). We read the current WMO weather
+# code and coarsely classify it. A "confidently calm" sky (used to gate daytime arming
+# and to shorten the cooldown) means no precipitation at all.
+_OPENMETEO_URL = "https://api.open-meteo.com/v1/forecast"
+_CALM_CONDITIONS = {"dry", "fog"}
+
+
+def _wmoCondition(code):
+    """Map an Open-Meteo WMO weather code to a coarse condition string."""
+    if code in (95, 96, 99):
+        return "thunderstorm"
+    if code in (0, 1, 2, 3):
+        return "dry"           # clear .. overcast, no precipitation
+    if code in (45, 48):
+        return "fog"
+    if code in (71, 73, 75, 77, 85, 86):
+        return "snow"
+    return "rain"              # drizzle / rain / showers (51..82) and anything else
 
 # the exact settings.json keys the NIGHT lightning mode overrides / restores
 _EXPOSURE_KEYS = ["nightautoexposure", "nightexposure",
@@ -219,6 +262,52 @@ def _saveState(state):
         json.dump(state, open(STATE_FILE, "w"), default=float)
     except Exception as ex:
         s.log(1, f"WARNING: lightning could not write state: {ex}")
+
+
+def _parseLatLon(v):
+    """settings.json stores coordinates like '48.136010N' / '14.389510E'.
+    Return a signed decimal float, or None if it can't be parsed."""
+    try:
+        v = str(v).strip()
+        sign = -1 if v[-1:].upper() in ("S", "W") else 1
+        return sign * float(v.rstrip("NSEWnsew ").strip())
+    except Exception:
+        return None
+
+
+def _getWeatherCondition(lat, lon, cache_sec):
+    """Current sky 'condition' at the site from Open-Meteo (free, no key, worldwide),
+    cached in ALLSKY_TMP so the API is hit at most every cache_sec.
+
+    FAIL-OPEN: on any error / missing location it returns None, and every caller
+    treats None as 'no weather info' (never blocks arming, never shortens the
+    cooldown). The weather gate can therefore never leave the camera stuck.
+
+    Returns a coarse condition string (dry/fog/rain/snow/thunderstorm) or None."""
+    try:
+        if os.path.exists(WEATHER_FILE):
+            c = json.load(open(WEATHER_FILE))
+            if time.time() - c.get("ts", 0) <= cache_sec:
+                return c.get("condition")
+    except Exception:
+        pass
+    if lat is None or lon is None:
+        return None
+    condition = None
+    try:
+        url = f"{_OPENMETEO_URL}?latitude={lat:.4f}&longitude={lon:.4f}&current=weather_code"
+        with urllib.request.urlopen(url, timeout=4) as r:
+            data = json.load(r)
+        code = (data.get("current") or {}).get("weather_code")
+        condition = _wmoCondition(code) if code is not None else None
+    except Exception as ex:
+        s.log(1, f"WARNING: lightning weather lookup failed: {ex}")
+        condition = None
+    try:  # cache even a None so a flapping network doesn't hammer the API
+        json.dump({"ts": time.time(), "condition": condition}, open(WEATHER_FILE, "w"))
+    except Exception:
+        pass
+    return condition
 
 
 def _resolveOutputDir(params):
@@ -358,6 +447,9 @@ def lightning(params, event):
     bolt_delta = s.int(params.get("bolt_delta", 40))
     bolt_min_area = s.int(params.get("bolt_min_area", 60))
     upload_remote = _truthy(params.get("upload_remote", True))
+    weather_gate = _truthy(params.get("weather_gate", False))
+    weather_cache_sec = s.asfloat(params.get("weather_cache_sec", 600))
+    weather_clear_cooldown_sec = s.asfloat(params.get("weather_clear_cooldown_sec", 120))
 
     if period == "day" and not day_enabled:
         return "day disabled"
@@ -388,23 +480,50 @@ def lightning(params, event):
     state["flash_times"] = [t for t in state.get("flash_times", []) if now - t <= window_sec]
     flashes_in_window = len(state["flash_times"])
 
+    # --- optional weather gate (Bright Sky / DWD, opt-in, fail-open) ----------
+    # Only look up the weather when it can actually change a decision: a flash just
+    # happened (possible arming) or we are armed (possible cooldown). The result is
+    # cached so the API is hit at most every weather_cache_sec.
+    wx_condition = None
+    wx_calm = False   # sky is confidently calm/clear per the weather service
+    if weather_gate and (is_flash or state["active"]):
+        lat = _parseLatLon(s.getSetting("latitude"))
+        lon = _parseLatLon(s.getSetting("longitude"))
+        wx_condition = _getWeatherCondition(lat, lon, weather_cache_sec)
+        wx_calm = wx_condition in _CALM_CONDITIONS
+
     # --- arming state machine (period-independent) ---------------------------
-    if not state["active"] and flashes_in_window >= flashes_to_arm:
+    # Weather gate, effect 1: during the DAY, don't let optical flashes arm the storm
+    # mode while the weather service reports a confidently calm sky - that is what
+    # stops drifting daytime clouds from arming. Night stays pure-optical (trusted +
+    # fast). Unknown weather (None) never blocks (fail-open).
+    arm_blocked = weather_gate and period == "day" and wx_calm
+    # Weather gate, effect 2: a confidently calm sky shortens the cooldown, so the
+    # camera resets much sooner once a storm has clearly moved on.
+    eff_cooldown = weather_clear_cooldown_sec if (weather_gate and wx_calm) else cooldown_sec
+
+    if not state["active"] and flashes_in_window >= flashes_to_arm and not arm_blocked:
         state["active"] = True
         s.log(1, f"INFO: lightning STORM detected ({flashes_in_window} flashes / {int(window_sec)}s)")
-    elif state["active"] and (now - state.get("last_flash", 0)) > cooldown_sec:
+    elif state["active"] and (now - state.get("last_flash", 0)) > eff_cooldown:
         state["active"] = False
-        s.log(1, "INFO: lightning storm ended (cooldown elapsed)")
+        s.log(1, f"INFO: lightning storm ended (cooldown {int(eff_cooldown)}s elapsed"
+                 + (f", weather={wx_condition}" if weather_gate else "") + ")")
 
-    # --- NIGHT: apply / restore the short exposure to match the storm state ---
+    # --- apply / restore the short exposure to match the storm state ---------
     transitioned = False
-    if period == "night":
-        if state["active"] and not state.get("saved"):
-            _enterLightningMode(state, expo_ms, gain, delay_ms)
-            transitioned = True
-        elif not state["active"] and state.get("saved"):
-            _exitLightningMode(state)
-            transitioned = True
+    # ENTER lightning mode: NIGHT only - we only ever override the night exposure.
+    if period == "night" and state["active"] and not state.get("saved"):
+        _enterLightningMode(state, expo_ms, gain, delay_ms)
+        transitioned = True
+    # EXIT / restore: from ANY flow (day or night). If a storm ends after the
+    # day/night boundary (e.g. it keeps going past dawn) the night exposure would
+    # otherwise stay overridden until the next real night frame - hours later.
+    # Restoring the night settings from the day flow is harmless (day uses the day
+    # exposure) and resets the camera as soon as the cooldown elapses.
+    elif not state["active"] and state.get("saved"):
+        _exitLightningMode(state)
+        transitioned = True
 
     # --- bolt capture (only while armed) -------------------------------------
     result = "quiet"
@@ -456,6 +575,7 @@ def lightning(params, event):
         s.saveExtraData("allsky_lightning.json", {
             "AS_LIGHTNING_MODE": "ON" if state["active"] else "OFF",
             "AS_LIGHTNING_FLASHES": flashes_in_window,
+            "AS_LIGHTNING_WX": (wx_condition or "n/a") if weather_gate else "off",
         })
     except Exception:
         pass
@@ -474,7 +594,7 @@ def lightning_cleanup():
     moduleData = {
         "metaData": metaData,
         "cleanup": {
-            "files": {STATE_FILE, PREV_FRAME},
+            "files": {STATE_FILE, PREV_FRAME, WEATHER_FILE},
             "env": {}
         }
     }
