@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.5.0
+
+- **Fix: day/night was read from the wrong place, so daytime frames were captured as
+  false "bolts".** Allsky calls the flow with `event="postcapture"` (not `"day"`/
+  `"night"`), so the old `event`-based check made every frame look like night. That meant
+  `day_enabled` never took effect and the bright daytime sky and drifting clouds were
+  saved as bolts, and the storm mode stayed armed around the clock (moving clouds keep
+  producing "flashes"). The period now comes from the `DAY_OR_NIGHT` environment variable.
+- **Daytime capture off by default and truly off.** With `day_enabled` unset the module
+  no longer runs detection or saves anything during the day; it only keeps managing the
+  storm state so a storm ending around dawn still disarms and restores the night exposure.
+- Note: a brightness trigger cannot make pretty bolt images from a fully overcast storm -
+  it detects the flash (the whole cloud deck lights up) but there is no visible bolt.
+
 ## v0.4.0
 
 - **Optional weather gate (Open-Meteo, free, no API key, worldwide).** Off by default.

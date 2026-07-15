@@ -50,7 +50,7 @@ import numpy as np
 metaData = {
     "name": "Lightning Capture",
     "description": "Detects thunderstorms from brightness transients and switches to short exposures to capture crisp lightning bolts",
-    "version": "v0.4.0",
+    "version": "v0.5.0",
     "events": [
         "day",
         "night"
@@ -427,7 +427,15 @@ def lightning(params, event):
         s.log(0, "ERROR: lightning module received no image")
         return "no image"
 
-    period = "day" if str(event).lower() == "day" else "night"
+    # Allsky calls the flow with event="postcapture" for per-image runs - NOT "day"/
+    # "night". The real time of day is in the DAY_OR_NIGHT environment variable. Reading
+    # `event` here made EVERY frame look like "night", so day_enabled never took effect
+    # and the bright daytime sky / drifting clouds were processed as if at night and
+    # saved as false "bolts". Fall back to the event arg only if the env var is missing.
+    tod = (s.getEnvironmentVariable("DAY_OR_NIGHT") or "").strip().lower()
+    if tod not in ("day", "night"):
+        tod = "day" if str(event).lower() == "day" else "night"
+    period = tod
     debug = _truthy(params.get("debug", False))
     now = time.time()
 
@@ -451,27 +459,34 @@ def lightning(params, event):
     weather_cache_sec = s.asfloat(params.get("weather_cache_sec", 600))
     weather_clear_cooldown_sec = s.asfloat(params.get("weather_clear_cooldown_sec", 120))
 
-    if period == "day" and not day_enabled:
-        return "day disabled"
+    # Daytime capture with a brightness trigger is hopeless - the bright sky and drifting
+    # clouds swamp any bolt (they get saved as false "sunshine bolts"). So unless
+    # day_enabled is set we do NOT detect or capture during the day. We still fall through
+    # to the state machine below, so a storm that ends around dawn is disarmed and the
+    # night exposure restored.
+    detect = not (period == "day" and not day_enabled)
 
     outdir, thumbdir = _resolveOutputDir(params)
 
-    gray = cv2.cvtColor(s.image, cv2.COLOR_BGR2GRAY)
-    soft, hard = _loadMask(mask_name, feather, gray.shape)
-
     # --- difference vs previous frame: only NEW light (a flash/bolt appears) --------
-    prev = cv2.imread(PREV_FRAME, cv2.IMREAD_GRAYSCALE)
-    have_prev = prev is not None and prev.shape == gray.shape
+    gray = None
+    diff = None
+    have_prev = False
     flash_area = 0
     bolt_area = 0
     peak = 0
-    if have_prev:
-        diff = cv2.subtract(gray, prev)                    # clamps at 0: darker -> 0
-        diff = (diff.astype(np.float32) * soft).astype(np.uint8)
-        flash_area = int(np.count_nonzero(diff >= flash_delta))
-        bolt_area = int(np.count_nonzero(diff >= bolt_delta))
-        peak = int(diff.max())
-    is_flash = have_prev and flash_area >= flash_min_area
+    if detect:
+        gray = cv2.cvtColor(s.image, cv2.COLOR_BGR2GRAY)
+        soft, hard = _loadMask(mask_name, feather, gray.shape)
+        prev = cv2.imread(PREV_FRAME, cv2.IMREAD_GRAYSCALE)
+        have_prev = prev is not None and prev.shape == gray.shape
+        if have_prev:
+            diff = cv2.subtract(gray, prev)                # clamps at 0: darker -> 0
+            diff = (diff.astype(np.float32) * soft).astype(np.uint8)
+            flash_area = int(np.count_nonzero(diff >= flash_delta))
+            bolt_area = int(np.count_nonzero(diff >= bolt_delta))
+            peak = int(diff.max())
+    is_flash = detect and have_prev and flash_area >= flash_min_area
 
     state = _loadState()
     if is_flash:
@@ -525,9 +540,9 @@ def lightning(params, event):
         _exitLightningMode(state)
         transitioned = True
 
-    # --- bolt capture (only while armed) -------------------------------------
+    # --- bolt capture (only while armed AND actually detecting) --------------
     result = "quiet"
-    if state["active"]:
+    if detect and state["active"]:
         result = "armed"
         # skip the frame straight after an exposure change: its diff vs the
         # differently-scaled previous frame is meaningless.
@@ -549,19 +564,20 @@ def lightning(params, event):
                 result = f"bolt area={bolt_area}"
 
     # --- roll the previous frame ---------------------------------------------
-    if transitioned:
-        # exposure scale just changed: drop the stale reference so the next frame
-        # starts clean instead of firing a false flash on the brightness jump.
-        try:
-            if os.path.exists(PREV_FRAME):
-                os.remove(PREV_FRAME)
-        except Exception:
-            pass
-    else:
-        try:
-            cv2.imwrite(PREV_FRAME, gray)
-        except Exception:
-            pass
+    if detect:
+        if transitioned:
+            # exposure scale just changed: drop the stale reference so the next frame
+            # starts clean instead of firing a false flash on the brightness jump.
+            try:
+                if os.path.exists(PREV_FRAME):
+                    os.remove(PREV_FRAME)
+            except Exception:
+                pass
+        else:
+            try:
+                cv2.imwrite(PREV_FRAME, gray)
+            except Exception:
+                pass
 
     _saveState(state)
 
