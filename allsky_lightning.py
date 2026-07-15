@@ -50,7 +50,7 @@ import numpy as np
 metaData = {
     "name": "Lightning Capture",
     "description": "Detects thunderstorms from brightness transients and switches to short exposures to capture crisp lightning bolts",
-    "version": "v0.5.0",
+    "version": "v0.6.0",
     "events": [
         "day",
         "night"
@@ -508,11 +508,13 @@ def lightning(params, event):
         wx_calm = wx_condition in _CALM_CONDITIONS
 
     # --- arming state machine (period-independent) ---------------------------
-    # Weather gate, effect 1: during the DAY, don't let optical flashes arm the storm
-    # mode while the weather service reports a confidently calm sky - that is what
-    # stops drifting daytime clouds from arming. Night stays pure-optical (trusted +
-    # fast). Unknown weather (None) never blocks (fail-open).
-    arm_blocked = weather_gate and period == "day" and wx_calm
+    # Weather gate, effect 1: don't let optical flashes arm the storm mode while the
+    # weather service reports a confidently calm/clear sky (dry/fog) - day OR night.
+    # This stops drifting daytime clouds AND the fast brightness changes of twilight /
+    # moonlit clouds from false-arming on a night when there is no storm. A real storm
+    # never reads as calm (it reports rain/thunderstorm), so genuine night storms still
+    # arm optically. Unknown weather (None) never blocks (fail-open).
+    arm_blocked = weather_gate and wx_calm
     # Weather gate, effect 2: a confidently calm sky shortens the cooldown, so the
     # camera resets much sooner once a storm has clearly moved on.
     eff_cooldown = weather_clear_cooldown_sec if (weather_gate and wx_calm) else cooldown_sec

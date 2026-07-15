@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.6.0
+
+- **Fix: the weather gate now blocks false arming at night, not just during the day.**
+  Previously the calm-sky arm block only applied to daytime frames, so a clear, dry night
+  stayed purely optical. On such a night the fast frame-to-frame brightness changes of
+  twilight and drifting moonlit clouds could brighten a large patch of sky, register as
+  two "flashes", and false-arm the storm mode — forcing the camera into the short 2 s
+  lightning exposure even though no storm was present, which left the night images dark.
+  The calm-sky block (`arm_blocked = weather_gate and wx_calm`) now applies day and night.
+  A real storm never reads as calm (it reports rain/thunderstorm), so genuine night storms
+  still arm optically, and the gate stays fail-open on any lookup error.
+
 ## v0.5.0
 
 - **Fix: day/night was read from the wrong place, so daytime frames were captured as
