@@ -88,13 +88,36 @@ actually being seen — it only shortens the *quiet* timeout.
 
 ## Sun-elevation guard
 
-`min_sun_elevation` (default `-6` = end of civil twilight) is an independent backstop:
+`min_sun_elevation` (default `-12` = end of nautical twilight) is an independent backstop:
 the storm mode will **not arm while the sun is higher than this elevation**. A brightness
 trigger simply cannot work against a bright, fast-changing twilight sky — the ramp and
 sunlit clouds swamp any real bolt, and you cannot get a crisp bolt against a bright sky
 anyway. This covers the case where the weather lookup is unavailable/stale (which fails
 open). It uses the camera's latitude/longitude (NOAA solar-position math, no extra
 library); if the coordinates are missing it never blocks.
+
+The default is `-12` rather than `-6` because observed false flashes at this site sat at
+sun elevations of −6° to −8° — *below* civil twilight, where a −6° guard never fires.
+Nautical twilight (−12°) covers the whole ramp band with margin; the trade-off is losing
+roughly the first/last half-hour of possible storm coverage around each night's edge.
+
+## Nightly statistics
+
+The detector runs ~1000×/night, so the per-frame `debug` log is unusable for tuning.
+Instead the module keeps a small rolling stats file (`allsky_lightning_stats.json` in
+`ALLSKY_TMP`) and writes **one summary line to the Allsky log at dawn**, e.g.:
+
+```
+lightning night report - 143 flashes, peak 4/2 in window, max flash area 251203px;
+near-arms blocked 12 (sun 9, weather 3); storms armed 0
+```
+
+`peak N/M` is the most flashes seen in the rolling window against the `flashes_to_arm`
+threshold `M` — how close the night came to arming. `near-arms blocked` counts the frames
+that *reached* the arm threshold but were held off, split by which gate (sun / weather)
+caught them. The stats file also keeps the last 60 individual flash events (time, area,
+sun elevation, weather, block reason) for detailed tuning. Counters reset at dusk, so each
+report describes a single night. This is what makes the thresholds tunable from real data.
 
 ## Installation
 
@@ -119,7 +142,7 @@ sky to analyse, black = trees/horizon.
 | `day_enabled` | also detect/save on the day flow (capture-only) |
 | `weather_gate` | cross-check Open-Meteo: block arming (day + night) when the sky is calm + reset sooner after a storm |
 | `weather_cache_sec` / `weather_clear_cooldown_sec` | how often the weather API is queried / the shortened cooldown used when the sky is confidently calm |
-| `min_sun_elevation` | never arm while the sun is above this elevation (deg; `-6` = end of civil twilight) |
+| `min_sun_elevation` | never arm while the sun is above this elevation (deg; `-12` = end of nautical twilight, the default; `-6` = civil twilight) |
 
 ## Honest limitations
 

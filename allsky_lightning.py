@@ -51,7 +51,7 @@ import numpy as np
 metaData = {
     "name": "Lightning Capture",
     "description": "Detects thunderstorms from brightness transients and switches to short exposures to capture crisp lightning bolts",
-    "version": "v0.7.0",
+    "version": "v0.8.0",
     "events": [
         "day",
         "night"
@@ -77,7 +77,7 @@ metaData = {
         "weather_gate": "false",
         "weather_cache_sec": "600",
         "weather_clear_cooldown_sec": "120",
-        "min_sun_elevation": "-6.0",
+        "min_sun_elevation": "-12.0",
         "outputdir": "",
         "save_debug": "false",
         "debug": "false"
@@ -194,7 +194,7 @@ metaData = {
         "min_sun_elevation": {
             "required": "false",
             "description": "Min Sun Elevation (deg)",
-            "help": "The storm mode will not arm while the sun is higher than this elevation (degrees; -6 = end of civil twilight). A brightness trigger cannot work against a bright, fast-changing twilight sky, so this blocks false arming at dusk/dawn even if the weather lookup is unavailable. Uses the camera latitude/longitude; if those are missing it never blocks.",
+            "help": "The storm mode will not arm while the sun is higher than this elevation (degrees; -12 = end of nautical twilight, -6 = end of civil twilight). A brightness trigger cannot work against a bright, fast-changing twilight sky, so this blocks false arming at dusk/dawn even if the weather lookup is unavailable. Observed false flashes at this site sat at -6 to -8 deg, so the default is -12 to cover the whole ramp band with margin. Uses the camera latitude/longitude; if those are missing it never blocks.",
             "type": {"fieldtype": "spinner", "min": -18, "max": 10, "step": 1}
         },
         "outputdir": {
@@ -223,6 +223,7 @@ _maskCache = {"name": None, "soft": None, "hard": None}
 STATE_FILE = os.path.join(s.ALLSKY_TMP, "allsky_lightning_state.json")
 PREV_FRAME = os.path.join(s.ALLSKY_TMP, "allsky_lightning_prev.png")
 WEATHER_FILE = os.path.join(s.ALLSKY_TMP, "allsky_lightning_weather.json")
+STATS_FILE = os.path.join(s.ALLSKY_TMP, "allsky_lightning_stats.json")
 
 # Open-Meteo: free, no API key, worldwide (the site is in Austria, so a Germany-only
 # source like DWD/Bright Sky has no nearby station). We read the current WMO weather
@@ -270,6 +271,81 @@ def _saveState(state):
         json.dump(state, open(STATE_FILE, "w"), default=float)
     except Exception as ex:
         s.log(1, f"WARNING: lightning could not write state: {ex}")
+
+
+# --- lightweight nightly observability -----------------------------------------
+# The detector runs ~1000x/night; verbose per-frame logging (debug=true) is unusable
+# for tuning. Instead we keep a small rolling stats file that records only the rare,
+# interesting events (actual flashes and blocked near-arms) plus running maxima, and
+# emit ONE human-readable summary line to the log at dawn. Counters reset at dusk so
+# each entry describes a single night. Never raises.
+_STATS_RECENT_CAP = 60
+
+
+def _newStats(period):
+    return {"prev_period": period, "night_start": 0.0, "flashes": 0,
+            "near_arms": 0, "blocked_sun": 0, "blocked_weather": 0, "arms": 0,
+            "peak_in_window": 0, "max_flash_area": 0, "recent": []}
+
+
+def _loadStats():
+    try:
+        if os.path.exists(STATS_FILE):
+            return json.load(open(STATS_FILE))
+    except Exception:
+        pass
+    return _newStats(None)
+
+
+def _saveStats(stats):
+    try:
+        json.dump(stats, open(STATS_FILE, "w"), default=float)
+    except Exception:
+        pass
+
+
+def _updateStats(now, period, is_flash, flash_area, flashes_in_window,
+                 flashes_to_arm, arm_blocked, too_bright, wx_calm, weather_gate,
+                 sun_elev, wx_condition, just_armed):
+    """Accumulate per-night detector statistics and log a summary at day/night flips."""
+    stats = _loadStats()
+    prev = stats.get("prev_period")
+
+    # dusk (day -> night): a fresh observation night begins - reset the counters.
+    if prev == "day" and period == "night":
+        stats = _newStats(period)
+        stats["night_start"] = now
+    # dawn (night -> day): emit the nightly report before the counters go stale.
+    elif prev == "night" and period == "day":
+        s.log(1, f"INFO: lightning night report - {stats.get('flashes', 0)} flashes, "
+                 f"peak {stats.get('peak_in_window', 0)}/{flashes_to_arm} in window, "
+                 f"max flash area {stats.get('max_flash_area', 0)}px; near-arms blocked "
+                 f"{stats.get('near_arms', 0)} (sun {stats.get('blocked_sun', 0)}, "
+                 f"weather {stats.get('blocked_weather', 0)}); storms armed "
+                 f"{stats.get('arms', 0)}")
+    stats["prev_period"] = period
+
+    if is_flash:
+        stats["flashes"] = stats.get("flashes", 0) + 1
+        stats["max_flash_area"] = max(stats.get("max_flash_area", 0), flash_area)
+        stats["peak_in_window"] = max(stats.get("peak_in_window", 0), flashes_in_window)
+        reason = "+".join([r for r, on in
+                           (("sun", too_bright), ("weather", weather_gate and wx_calm)) if on])
+        if just_armed:
+            stats["arms"] = stats.get("arms", 0) + 1
+        elif flashes_in_window >= flashes_to_arm and arm_blocked:
+            stats["near_arms"] = stats.get("near_arms", 0) + 1
+            if too_bright:
+                stats["blocked_sun"] = stats.get("blocked_sun", 0) + 1
+            if weather_gate and wx_calm:
+                stats["blocked_weather"] = stats.get("blocked_weather", 0) + 1
+        rec = {"t": round(now), "area": int(flash_area), "inWin": int(flashes_in_window),
+               "sun": (round(sun_elev, 1) if sun_elev is not None else None),
+               "wx": (wx_condition if weather_gate else None),
+               "blk": (reason or ("armed" if just_armed else "none"))}
+        stats["recent"] = (stats.get("recent", []) + [rec])[-_STATS_RECENT_CAP:]
+
+    _saveStats(stats)
 
 
 def _parseLatLon(v):
@@ -508,7 +584,7 @@ def lightning(params, event):
     weather_gate = _truthy(params.get("weather_gate", False))
     weather_cache_sec = s.asfloat(params.get("weather_cache_sec", 600))
     weather_clear_cooldown_sec = s.asfloat(params.get("weather_clear_cooldown_sec", 120))
-    min_sun_elevation = s.asfloat(params.get("min_sun_elevation", -6.0))
+    min_sun_elevation = s.asfloat(params.get("min_sun_elevation", -12.0))
 
     # Daytime capture with a brightness trigger is hopeless - the bright sky and drifting
     # clouds swamp any bolt (they get saved as false "sunshine bolts"). So unless
@@ -562,7 +638,7 @@ def lightning(params, event):
     # A brightness-transient trigger cannot work while the sky itself is bright and
     # changing fast: the twilight ramp and sunlit clouds swamp any real bolt, and you
     # cannot get a crisp bolt against a bright sky anyway. So refuse to arm until the sun
-    # is safely below the horizon (min_sun_elevation, default -6 deg = end of civil
+    # is safely below the horizon (min_sun_elevation, default -12 deg = end of nautical
     # twilight). This backstops the weather gate for the case where the weather lookup is
     # unavailable/stale (which fails open). Unknown location -> None -> never blocks.
     sun_elev = None
@@ -584,8 +660,10 @@ def lightning(params, event):
     # camera resets much sooner once a storm has clearly moved on.
     eff_cooldown = weather_clear_cooldown_sec if (weather_gate and wx_calm) else cooldown_sec
 
+    just_armed = False
     if not state["active"] and flashes_in_window >= flashes_to_arm and not arm_blocked:
         state["active"] = True
+        just_armed = True
         s.log(1, f"INFO: lightning STORM detected ({flashes_in_window} flashes / {int(window_sec)}s)")
     elif state["active"] and (now - state.get("last_flash", 0)) > eff_cooldown:
         state["active"] = False
@@ -648,6 +726,11 @@ def lightning(params, event):
 
     _saveState(state)
 
+    # nightly stats + dawn summary (records flashes/blocked near-arms, resets at dusk)
+    _updateStats(now, period, is_flash, flash_area, flashes_in_window, flashes_to_arm,
+                 arm_blocked, too_bright, wx_calm, weather_gate, sun_elev, wx_condition,
+                 just_armed)
+
     if debug:
         s.log(1, f"INFO: lightning [{period}] flashArea={flash_area} boltArea={bolt_area} "
                  f"peak={peak} flash={is_flash} inWin={flashes_in_window} "
@@ -678,7 +761,7 @@ def lightning_cleanup():
     moduleData = {
         "metaData": metaData,
         "cleanup": {
-            "files": {STATE_FILE, PREV_FRAME, WEATHER_FILE},
+            "files": {STATE_FILE, PREV_FRAME, WEATHER_FILE, STATS_FILE},
             "env": {}
         }
     }

@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.8.0
+
+- **Sun-elevation guard default raised from -6° to -12° (nautical twilight).** A night of
+  observation showed the false optical "flashes" cluster at sun elevations of -6° to -8° —
+  i.e. *below* the old -6° guard, which therefore never fired on them; only the weather
+  gate (fail-open) was catching them. -12° covers the whole still-brightening twilight band
+  with margin, at the cost of ~25-35 min of storm coverage at each end of the night.
+- **Nightly detector statistics (`allsky_lightning_stats.json`) + a dawn summary line.**
+  The detector runs ~1000×/night, so the per-frame `debug` log is useless for tuning.
+  Instead the module now keeps a small rolling stats file (flash count, peak flashes-in-
+  window vs the arm threshold, max flash area, near-arms blocked and *by which gate*, plus
+  the last 60 individual flash events with time/area/sun/weather/block-reason) and emits
+  one human-readable `lightning night report - …` line to the Allsky log at dawn. Counters
+  reset automatically at dusk, so each report describes a single night. This is what makes
+  the thresholds tunable from real data instead of guesswork.
+
 ## v0.7.0
 
 - **Sun-elevation guard (`min_sun_elevation`, default -6°).** An independent backstop to
