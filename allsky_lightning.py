@@ -51,7 +51,7 @@ import numpy as np
 metaData = {
     "name": "Lightning Capture",
     "description": "Detects thunderstorms from brightness transients and switches to short exposures to capture crisp lightning bolts",
-    "version": "v0.8.0",
+    "version": "v0.8.1",
     "events": [
         "day",
         "night"
@@ -220,7 +220,26 @@ metaData = {
 
 # --- persistent state between frames (module stays loaded in the postprocess service) ---
 _maskCache = {"name": None, "soft": None, "hard": None}
-STATE_FILE = os.path.join(s.ALLSKY_TMP, "allsky_lightning_state.json")
+
+
+def _stateDir():
+    """Directory for state that must survive a REBOOT, not just a frame.
+
+    ALLSKY_TMP is a tmpfs. Keeping the storm state there meant a restart while a storm
+    was active wiped state["saved"] while settings.json still held the short exposure -
+    the next arm then saved the override as the 'original' and every later restore was
+    a no-op, leaving the camera on 2 s night frames for good. Falls back to ALLSKY_TMP
+    if the real-disk directory cannot be created. Never raises."""
+    try:
+        base = s.getEnvironmentVariable("ALLSKY_HOME") or os.path.expanduser("~/allsky")
+        path = os.path.join(base, "config", "allsky_lightning")
+        os.makedirs(path, exist_ok=True)
+        return path
+    except Exception:
+        return s.ALLSKY_TMP
+
+
+STATE_FILE = os.path.join(_stateDir(), "allsky_lightning_state.json")
 PREV_FRAME = os.path.join(s.ALLSKY_TMP, "allsky_lightning_prev.png")
 WEATHER_FILE = os.path.join(s.ALLSKY_TMP, "allsky_lightning_weather.json")
 STATS_FILE = os.path.join(s.ALLSKY_TMP, "allsky_lightning_stats.json")
@@ -263,7 +282,8 @@ def _loadState():
             return json.load(open(STATE_FILE))
     except Exception:
         pass
-    return {"active": False, "saved": None, "last_flash": 0.0, "flash_times": []}
+    return {"active": False, "saved": None, "last_flash": 0.0, "flash_times": [],
+            "override_unknown": False}
 
 
 def _saveState(state):
@@ -469,12 +489,38 @@ def _loadMask(maskName, feather, shape):
     return soft, hard
 
 
+def _isOverride(current, expo_ms, gain, delay_ms):
+    """True when the night settings already ARE this module's short-exposure override.
+    Such values can never be genuine 'originals'."""
+    try:
+        return (not _truthy(current.get("nightautoexposure"))
+                and not _truthy(current.get("nightautogain"))
+                and s.int(current.get("nightexposure")) == s.int(expo_ms)
+                and s.int(current.get("nightgain")) == s.int(gain))
+    except Exception:
+        return False
+
+
 def _enterLightningMode(state, expo_ms, gain, delay_ms):
-    """Save the current night-exposure settings ONCE, then switch to short exposures."""
+    """Save the current night-exposure settings ONCE, then switch to short exposures.
+    Returns True when the mode was actually entered."""
     if not state.get("saved"):
         # only capture originals when the exposure is NOT already overridden, so a
         # restart mid-storm can never save the short exposure as the 'original'.
-        state["saved"] = {k: s.getSetting(k) for k in _EXPOSURE_KEYS}
+        current = {k: s.getSetting(k) for k in _EXPOSURE_KEYS}
+        if _isOverride(current, expo_ms, gain, delay_ms):
+            # Belt-and-braces behind the persistent STATE_FILE: the night settings are
+            # already our override while we hold no saved originals, so the real values
+            # are unrecoverable from here. Saving these would make every later restore a
+            # no-op and keep the camera on short night frames for good - black images
+            # that removeBadImages.sh then deletes. Refuse and say so loudly instead.
+            state["override_unknown"] = True
+            s.log(0, "ERROR: lightning NOT entering mode - night settings already look "
+                     f"like the short-exposure override ({current}) but no originals "
+                     "are saved. Restore nightautoexposure/nightexposure/nightautogain/"
+                     "nightgain/nightdelay by hand; the mode stays off until then.")
+            return False
+        state["saved"] = current
     s.updateSetting([
         {"nightautoexposure": False},
         {"nightexposure": s.int(expo_ms)},
@@ -484,6 +530,7 @@ def _enterLightningMode(state, expo_ms, gain, delay_ms):
     ])
     s.log(1, f"INFO: lightning mode ON - exposure {expo_ms} ms, gain {gain}, "
              f"delay {delay_ms} ms (was {state['saved']})")
+    return True
 
 
 def _exitLightningMode(state):
@@ -493,6 +540,8 @@ def _exitLightningMode(state):
         s.updateSetting([{k: saved[k]} for k in _EXPOSURE_KEYS if saved.get(k) is not None])
         s.log(1, f"INFO: lightning mode OFF - restored {saved}")
     state["saved"] = None
+    # clear the refusal too, so a later storm can arm again once the settings are fixed
+    state["override_unknown"] = False
 
 
 def _saveBolt(outdir, thumbdir, fname, rec):
@@ -673,15 +722,15 @@ def lightning(params, event):
     # --- apply / restore the short exposure to match the storm state ---------
     transitioned = False
     # ENTER lightning mode: NIGHT only - we only ever override the night exposure.
-    if period == "night" and state["active"] and not state.get("saved"):
-        _enterLightningMode(state, expo_ms, gain, delay_ms)
-        transitioned = True
+    if period == "night" and state["active"] and not state.get("saved") \
+            and not state.get("override_unknown"):
+        transitioned = _enterLightningMode(state, expo_ms, gain, delay_ms)
     # EXIT / restore: from ANY flow (day or night). If a storm ends after the
     # day/night boundary (e.g. it keeps going past dawn) the night exposure would
     # otherwise stay overridden until the next real night frame - hours later.
     # Restoring the night settings from the day flow is harmless (day uses the day
     # exposure) and resets the camera as soon as the cooldown elapses.
-    elif not state["active"] and state.get("saved"):
+    elif not state["active"] and (state.get("saved") or state.get("override_unknown")):
         _exitLightningMode(state)
         transitioned = True
 

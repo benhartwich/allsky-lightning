@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.8.1
+
+- **Fixed: the camera could get stuck on the short storm exposure permanently.** The state
+  file lived in `ALLSKY_TMP`, which is a **tmpfs**. A reboot while a storm was active wiped
+  `state["saved"]` while `settings.json` — on real disk — still held the short exposure. The
+  next arm then saved that override as the "original", so every later restore was a no-op and
+  the camera kept taking 2 s night frames indefinitely. Those frames are near-black, so
+  `removeBadImages.sh` deleted them once their mean fell below the low threshold: no night
+  images at all. Observed in the field from 2026-08-23 to 2026-09-01 (10 nights).
+  The guard in `_enterLightningMode` was correct in intent but rested on the state surviving a
+  restart, which on a tmpfs it does not.
+- **State moved off the tmpfs.** New `_stateDir()` puts `allsky_lightning_state.json` under
+  `ALLSKY_HOME/config/allsky_lightning/`, falling back to `ALLSKY_TMP` if that cannot be
+  created. `PREV_FRAME`, `WEATHER_FILE` and `STATS_FILE` stay in tmp — they are caches and
+  losing them is harmless.
+- **Added a second line of defence: `_isOverride()`.** If the night settings already look
+  exactly like this module's own override while no originals are saved, the genuine values are
+  unrecoverable — so the module now refuses to save them, refuses to enter the mode, and logs
+  an `ERROR` naming the settings to restore by hand. Previously it silently saved the override
+  and cemented the broken state. The `override_unknown` flag keeps this from spamming the log
+  on every frame and is cleared when the storm ends, so a later storm arms normally once the
+  settings are fixed. `_enterLightningMode()` now returns a bool.
+
 ## v0.8.0
 
 - **Sun-elevation guard default raised from -6° to -12° (nautical twilight).** A night of
