@@ -34,9 +34,12 @@ and daytime exposures are already short - so the day path is CAPTURE-ONLY: it de
 and saves bolt frames but does NOT touch the (already short) day exposure. Treat it as
 best-effort; the strong dark storm-cell contrast is where it can still work.
 
+The exposure change is pushed to the RUNNING camera (see _serviceCaptureReload): writing
+settings.json alone is not enough, because the capture program only reads it at start.
+
 Safety: the original night-exposure settings are saved on the FIRST override and always
 restored on exit / after the cooldown / on cleanup, so the camera can never get stuck in
-short-exposure mode - even across a service restart or into the next night.
+short-exposure mode - even across a service restart, a reboot, or into the next night.
 """
 import allsky_shared as s
 import os
@@ -44,6 +47,7 @@ import json
 import time
 import math
 import subprocess
+import signal
 import urllib.request
 import cv2
 import numpy as np
@@ -51,7 +55,7 @@ import numpy as np
 metaData = {
     "name": "Lightning Capture",
     "description": "Detects thunderstorms from brightness transients and switches to short exposures to capture crisp lightning bolts",
-    "version": "v0.8.1",
+    "version": "v0.9.0",
     "events": [
         "day",
         "night"
@@ -78,6 +82,8 @@ metaData = {
         "weather_cache_sec": "600",
         "weather_clear_cooldown_sec": "120",
         "min_sun_elevation": "-12.0",
+        "reload_capture": "true",
+        "reload_min_interval_sec": "300",
         "outputdir": "",
         "save_debug": "false",
         "debug": "false"
@@ -197,6 +203,18 @@ metaData = {
             "help": "The storm mode will not arm while the sun is higher than this elevation (degrees; -12 = end of nautical twilight, -6 = end of civil twilight). A brightness trigger cannot work against a bright, fast-changing twilight sky, so this blocks false arming at dusk/dawn even if the weather lookup is unavailable. Observed false flashes at this site sat at -6 to -8 deg, so the default is -12 to cover the whole ramp band with margin. Uses the camera latitude/longitude; if those are missing it never blocks.",
             "type": {"fieldtype": "spinner", "min": -18, "max": 10, "step": 1}
         },
+        "reload_capture": {
+            "required": "false",
+            "description": "Apply Exposure To Running Camera",
+            "help": "Push the storm exposure to the CAMERA, not just to settings.json. Allsky's capture program reads settings.json only once, at start (allsky.sh converts it into tmp/capture_args.txt and passes that snapshot), so without this the short exposure reaches the camera only at the next Allsky restart - the switch effectively never happens during a storm. With this on, the module uses Allsky's own reload path: SIGHUP to the capture program, which exits with EXIT_RESTARTING so the service restarts it and regenerates capture_args.txt. Costs a full capture restart - measured on a Pi 4 / ASI678MC: 9 s from the signal to the first new exposure, 16 s to the first saved image - and the exposure in flight is lost (up to 90 s at night). No elevated privileges are involved - capture runs as the same user as this module.",
+            "type": {"fieldtype": "checkbox"}
+        },
+        "reload_min_interval_sec": {
+            "required": "false",
+            "description": "Minimum Reload Interval (s)",
+            "help": "Shortest time between two camera reloads. Every arm/disarm would otherwise restart the capture program, so a storm state that flaps near its threshold could restart the camera every few minutes. A reload blocked by this limit is NOT dropped - it stays pending and fires on a later frame, so the camera can never be left on an exposure that no longer matches settings.json.",
+            "type": {"fieldtype": "spinner", "min": 60, "max": 3600, "step": 30}
+        },
         "outputdir": {
             "required": "false",
             "description": "Output Folder",
@@ -283,7 +301,7 @@ def _loadState():
     except Exception:
         pass
     return {"active": False, "saved": None, "last_flash": 0.0, "flash_times": [],
-            "override_unknown": False}
+            "override_unknown": False, "last_reload": 0.0, "reload_pending": False}
 
 
 def _saveState(state):
@@ -489,6 +507,84 @@ def _loadMask(maskName, feather, shape):
     return soft, hard
 
 
+# --- pushing new settings to the RUNNING capture program ------------------------
+# s.updateSetting() only rewrites settings.json, and the capture program never re-reads
+# it: allsky.sh converts settings.json into tmp/capture_args.txt ONCE at start and passes
+# that snapshot via -config. Measured in the field on 2026-08-22: a storm armed at
+# 22:00:21 and the exposure stayed at 90 s for 20+ frames, only changing at 00:00:40 when
+# the Pi rebooted. In other words the storm switch never actually reached the camera.
+#
+# Allsky's supported way to apply new settings is scripts/utilities/reload.sh, which the
+# service runs as ExecReload: it sends SIGHUP to the capture program, whose handler exits
+# with EXIT_RESTARTING (98); allsky.sh then exits 0 and systemd's Restart=on-success
+# starts it again, regenerating capture_args.txt from settings.json. Note this is a full
+# capture restart, not an in-place reload - allsky_common.cpp carries an explicit
+# "TODO: Re-read configuration instead of restarting." Measured cost on a Pi 4 / ASI678MC:
+# 9 s from the signal to the first new exposure, 16 s to the first saved image, plus the
+# exposure in flight. capture runs as the same user as this module, so no privileges.
+
+def _capturePid():
+    """PID of the running capture program, or None. Mirrors reload.sh: capture is the
+    child of allsky.sh, which is the service MainPID. Never raises."""
+    try:
+        main = subprocess.run(["systemctl", "show", "-p", "MainPID", "--value", "allsky"],
+                              capture_output=True, text=True, timeout=10).stdout.strip()
+        if main.isdigit() and int(main) > 0:
+            kids = subprocess.run(["pgrep", "--parent", main],
+                                  capture_output=True, text=True, timeout=10).stdout.split()
+            if kids:
+                return int(kids[0])
+    except Exception:
+        pass
+    for name in ("capture_ZWO", "capture_RPi"):     # fallback if systemd is unavailable
+        try:
+            out = subprocess.run(["pgrep", "-x", name],
+                                 capture_output=True, text=True, timeout=10).stdout.split()
+            if out:
+                return int(out[0])
+        except Exception:
+            pass
+    return None
+
+
+def _serviceCaptureReload(state, min_interval):
+    """Send a pending SIGHUP if the rate limit allows. A throttled request STAYS pending
+    and is retried on later frames, so the camera can never be left running an exposure
+    that no longer matches settings.json. Never raises."""
+    if not state.get("reload_pending"):
+        return False
+    now = time.time()
+    if now - state.get("last_reload", 0.0) < min_interval:
+        return False
+    pid = _capturePid()
+    if pid is None:
+        state["reload_pending"] = False
+        s.log(1, "WARNING: lightning found no capture process to reload - the new "
+                 "exposure will apply at the next Allsky restart")
+        return False
+    # Persist BEFORE signalling. This module runs as a DESCENDANT of the capture program
+    # (capture -> saveImage.sh -> flow-runner.py -> here), so the SIGHUP tears down our
+    # parent while we are still running. Writing the state first means a lost tail can
+    # never drop the rate limit and turn this into a restart loop.
+    state["last_reload"] = now
+    state["reload_pending"] = False
+    _saveState(state)
+    try:
+        os.kill(pid, signal.SIGHUP)
+    except Exception as ex:
+        s.log(1, f"WARNING: lightning could not signal capture (pid {pid}): {ex}")
+        return False
+    s.log(1, f"INFO: lightning reloading capture (SIGHUP to pid {pid}) - Allsky restarts "
+             "it in ~9 s with the new exposure")
+    return True
+
+
+def _requestCaptureReload(state, min_interval):
+    """Mark that capture must pick up settings.json, and do it as soon as allowed."""
+    state["reload_pending"] = True
+    return _serviceCaptureReload(state, min_interval)
+
+
 def _isOverride(current, expo_ms, gain, delay_ms):
     """True when the night settings already ARE this module's short-exposure override.
     Such values can never be genuine 'originals'."""
@@ -634,6 +730,8 @@ def lightning(params, event):
     weather_cache_sec = s.asfloat(params.get("weather_cache_sec", 600))
     weather_clear_cooldown_sec = s.asfloat(params.get("weather_clear_cooldown_sec", 120))
     min_sun_elevation = s.asfloat(params.get("min_sun_elevation", -12.0))
+    reload_capture = _truthy(params.get("reload_capture", True))
+    reload_min_interval = s.asfloat(params.get("reload_min_interval_sec", 300))
 
     # Daytime capture with a brightness trigger is hopeless - the bright sky and drifting
     # clouds swamp any bolt (they get saved as false "sunshine bolts"). So unless
@@ -725,14 +823,25 @@ def lightning(params, event):
     if period == "night" and state["active"] and not state.get("saved") \
             and not state.get("override_unknown"):
         transitioned = _enterLightningMode(state, expo_ms, gain, delay_ms)
+        if transitioned and reload_capture:
+            _requestCaptureReload(state, reload_min_interval)
     # EXIT / restore: from ANY flow (day or night). If a storm ends after the
     # day/night boundary (e.g. it keeps going past dawn) the night exposure would
     # otherwise stay overridden until the next real night frame - hours later.
     # Restoring the night settings from the day flow is harmless (day uses the day
     # exposure) and resets the camera as soon as the cooldown elapses.
     elif not state["active"] and (state.get("saved") or state.get("override_unknown")):
+        restored = bool(state.get("saved"))
         _exitLightningMode(state)
         transitioned = True
+        # Reload from the day flow too: capture_args.txt holds BOTH the day and the night
+        # settings and is fixed for the whole service run, so a night exposure restored
+        # during the day would otherwise still not apply at dusk.
+        if restored and reload_capture:
+            _requestCaptureReload(state, reload_min_interval)
+    elif reload_capture:
+        # steady state - flush a request an earlier frame had to throttle
+        _serviceCaptureReload(state, reload_min_interval)
 
     # --- bolt capture (only while armed AND actually detecting) --------------
     result = "quiet"

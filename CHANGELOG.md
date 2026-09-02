@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.9.0
+
+- **The storm exposure now actually reaches the camera.** Until now the module only
+  rewrote `settings.json` via `s.updateSetting()`, but the capture program never re-reads
+  that file: `allsky.sh` converts it into `tmp/capture_args.txt` once at start and passes
+  that snapshot with `-config`. Measured in the field on 2026-08-22: a storm armed at
+  22:00:21 and the exposure stayed at 90 s for more than 20 frames, changing to 2 s only
+  at 00:00:40 when the Pi rebooted. In other words, the module's central feature -
+  switching to short exposures during a storm - had never once taken effect while a storm
+  was running. Every lightning frame captured so far was a long exposure.
+- **New setting "Apply Exposure To Running Camera" (`reload_capture`, default on).** Uses
+  Allsky's own supported path, the one the service declares as `ExecReload`: send SIGHUP
+  to the capture program, whose handler exits with `EXIT_RESTARTING` (98), so `allsky.sh`
+  exits 0 and systemd's `Restart=on-success` starts it again and regenerates
+  `capture_args.txt` from `settings.json`. This is a full capture restart, not an in-place
+  reload - `allsky_common.cpp` carries an explicit
+  `TODO: Re-read configuration instead of restarting.` Measured end-to-end on a Pi 4 with
+  an ASI678MC: 9 s from the signal to the first new exposure, 16 s to the first saved
+  image, plus the exposure in flight (up to 90 s at night). No elevated privileges:
+  capture runs as the same user as this module.
+- **New setting "Minimum Reload Interval" (`reload_min_interval_sec`, default 300).**
+  Every arm/disarm would otherwise restart the capture program, so a storm state flapping
+  near its threshold could restart the camera every few minutes. A reload blocked by the
+  limit is not dropped: it stays pending and fires on a later frame, so the camera can
+  never be left on an exposure that no longer matches `settings.json`.
+- The reload also fires from the **day** flow when the night exposure is restored there.
+  `capture_args.txt` holds both the day and the night settings and is fixed for the whole
+  service run, so a night exposure restored during the day would otherwise still not apply
+  at dusk.
+- The state is written to disk **before** the signal is sent. This module runs as a
+  descendant of the capture program (capture -> `saveImage.sh` -> `flow-runner.py` -> here),
+  so the SIGHUP tears down our parent while we are still running; persisting first means a
+  lost tail cannot drop the rate limit and turn this into a restart loop.
+
 ## v0.8.1
 
 - **Fixed: the camera could get stuck on the short storm exposure permanently.** The state

@@ -54,7 +54,41 @@ The original night-exposure settings are saved on the **first** override and alw
 restored on exit / after the cooldown / on module cleanup, so the camera can **never** get
 stuck in short-exposure mode — even across a service restart or into the next night. The
 save-once / restore logic is guarded so a restart mid-storm cannot mistake the short
-exposure for the "original".
+exposure for the "original", and the state lives on real disk (not the tmpfs) so it also
+survives a reboot.
+
+## Applying the exposure to the running camera
+
+Writing `settings.json` is **not enough on its own**. Allsky's capture program reads that
+file only once: `allsky.sh` converts it into `tmp/capture_args.txt` at start and passes
+that snapshot with `-config`. Without help, a storm exposure written mid-night would reach
+the camera only at the next Allsky restart — in practice, never during the storm.
+
+With `reload_capture` on (the default) the module uses Allsky's own supported path, the
+one the service declares as `ExecReload`:
+
+```
+module writes settings.json
+   -> SIGHUP to the capture program        (scripts/utilities/reload.sh does the same)
+   -> capture exits with EXIT_RESTARTING (98)
+   -> allsky.sh exits 0
+   -> systemd Restart=on-success restarts it
+   -> allsky.sh regenerates capture_args.txt from settings.json
+```
+
+Two things worth knowing:
+
+* This is a **full capture restart**, not an in-place reload — `allsky_common.cpp` still
+  carries `TODO: Re-read configuration instead of restarting.` Measured on a Pi 4 with an
+  ASI678MC: **9 s** from the signal to the first new exposure, 16 s to the first saved
+  image, plus the exposure in flight (up to 90 s at night).
+* `reload_min_interval_sec` (default 300) bounds how often that can happen, so a storm
+  state flapping near its threshold cannot restart the camera every few minutes. A reload
+  blocked by the limit stays **pending** and fires on a later frame, so the camera is never
+  left on an exposure that no longer matches `settings.json`.
+
+No elevated privileges are involved: the capture program runs as the same user as the
+module.
 
 ## Daytime
 
@@ -143,6 +177,8 @@ sky to analyse, black = trees/horizon.
 | `weather_gate` | cross-check Open-Meteo: block arming (day + night) when the sky is calm + reset sooner after a storm |
 | `weather_cache_sec` / `weather_clear_cooldown_sec` | how often the weather API is queried / the shortened cooldown used when the sky is confidently calm |
 | `min_sun_elevation` | never arm while the sun is above this elevation (deg; `-12` = end of nautical twilight, the default; `-6` = civil twilight) |
+| `reload_capture` | push the exposure to the **running** camera via SIGHUP (on by default); without it a change only applies at the next Allsky restart |
+| `reload_min_interval_sec` | shortest gap between two camera reloads; a throttled reload stays pending rather than being dropped |
 
 ## Honest limitations
 
