@@ -55,7 +55,7 @@ import numpy as np
 metaData = {
     "name": "Lightning Capture",
     "description": "Detects thunderstorms from brightness transients and switches to short exposures to capture crisp lightning bolts",
-    "version": "v0.9.0",
+    "version": "v0.10.0",
     "events": [
         "day",
         "night"
@@ -84,6 +84,7 @@ metaData = {
         "min_sun_elevation": "-12.0",
         "reload_capture": "true",
         "reload_min_interval_sec": "300",
+        "rearm_holdoff_sec": "1800",
         "outputdir": "",
         "save_debug": "false",
         "debug": "false"
@@ -206,7 +207,7 @@ metaData = {
         "reload_capture": {
             "required": "false",
             "description": "Apply Exposure To Running Camera",
-            "help": "Push the storm exposure to the CAMERA, not just to settings.json. Allsky's capture program reads settings.json only once, at start (allsky.sh converts it into tmp/capture_args.txt and passes that snapshot), so without this the short exposure reaches the camera only at the next Allsky restart - the switch effectively never happens during a storm. With this on, the module uses Allsky's own reload path: SIGHUP to the capture program, which exits with EXIT_RESTARTING so the service restarts it and regenerates capture_args.txt. Costs a full capture restart - measured on a Pi 4 / ASI678MC: 9 s from the signal to the first new exposure, 16 s to the first saved image - and the exposure in flight is lost (up to 90 s at night). No elevated privileges are involved - capture runs as the same user as this module.",
+            "help": "Push the storm exposure to the CAMERA, not just to settings.json. Allsky's capture program reads settings.json only once, at start (allsky.sh converts it into tmp/capture_args.txt and passes that snapshot), so without this the short exposure reaches the camera only at the next Allsky restart - the switch effectively never happens during a storm. With this on, the module uses Allsky's own reload path: SIGHUP to the capture program, which exits with EXIT_RESTARTING so the service restarts it and regenerates capture_args.txt. Costs a full capture restart - measured on a Pi 4 / ASI678MC: 9 s from the signal to the first new exposure, 16 s to the first saved image - and the exposure in flight is lost (up to 90 s at night). No elevated privileges are involved - capture runs as the same user as this module. SAFETY: the switch INTO the storm exposure only happens when allsky.service would also restart after a shutdown that times out (Restart=always / on-failure / on-abnormal). Allsky's default Restart=on-success does not, and an upload hanging on an unreachable remote website can make the shutdown time out - the camera then stays stopped. On such a service the storm is still detected and bolts are still saved, just at the normal exposure; see 'Service hardening' in the README. The switch BACK always happens when the camera needs it, and is skipped when the running camera already has the restored values.",
             "type": {"fieldtype": "checkbox"}
         },
         "reload_min_interval_sec": {
@@ -214,6 +215,12 @@ metaData = {
             "description": "Minimum Reload Interval (s)",
             "help": "Shortest time between two camera reloads. Every arm/disarm would otherwise restart the capture program, so a storm state that flaps near its threshold could restart the camera every few minutes. A reload blocked by this limit is NOT dropped - it stays pending and fires on a later frame, so the camera can never be left on an exposure that no longer matches settings.json.",
             "type": {"fieldtype": "spinner", "min": 60, "max": 3600, "step": 30}
+        },
+        "rearm_holdoff_sec": {
+            "required": "false",
+            "description": "Re-arm Hold-off (s)",
+            "help": "After the normal exposure has been restored, do not switch back to the storm exposure for this long. At the edge of a storm the flash rate drifts around the arming threshold, and every switch in either direction is a full camera restart. The storm itself still re-arms and bolts are still captured - only the exposure switch waits. If the storm is still going when the hold-off ends, the switch happens then.",
+            "type": {"fieldtype": "spinner", "min": 0, "max": 7200, "step": 60}
         },
         "outputdir": {
             "required": "false",
@@ -585,6 +592,101 @@ def _requestCaptureReload(state, min_interval):
     return _serviceCaptureReload(state, min_interval)
 
 
+# --- is a capture restart safe on this install? ---------------------------------------
+# A reload is a full service restart, and whether the service comes back depends on how
+# its SHUTDOWN goes. When capture exits, systemd sends SIGTERM to everything left in the
+# service and waits TimeoutStopSec (90 s by default). Some of what is left ignores that on
+# purpose: upload.sh runs `trap "" SIGTERM` so a transfer is never cut off (lftp inherits
+# the ignore), and capture itself starts a 'Restarting' notification upload the moment it
+# gets the SIGHUP. With the remote website unreachable those uploads sit in lftp retries,
+# the stop runs past 90 s, and systemd records the result as 'timeout'. Allsky's unit has
+# Restart=on-success, which restarts only on a clean result - so the camera stays down
+# until someone restarts it by hand. Seen on 2026-09-20: three reloads in 20 minutes,
+# the first two came back, the third stopped the camera for the rest of the night.
+
+def _restartSurvivesStopTimeout():
+    """True when systemd restarts allsky.service even after a stop that timed out:
+    Restart=always, on-failure or on-abnormal. Allsky's default on-success does not.
+    Readable without privileges. Unknown counts as unsafe."""
+    try:
+        policy = subprocess.run(["systemctl", "show", "-p", "Restart", "--value", "allsky"],
+                                capture_output=True, text=True, timeout=10).stdout.strip()
+        return policy in ("always", "on-failure", "on-abnormal")
+    except Exception:
+        return False
+
+
+def _liveNightArgs():
+    """The night-exposure values the RUNNING capture was started with. allsky.sh writes
+    them to ALLSKY_TMP/capture_args.txt at every start and capture never re-reads
+    settings.json, so this - not settings.json - is what the camera is doing.
+    None when unreadable."""
+    try:
+        live = {}
+        with open(os.path.join(s.ALLSKY_TMP, "capture_args.txt")) as fh:
+            for line in fh:
+                key, sep, value = line.strip().partition("=")
+                if sep and key in _EXPOSURE_KEYS:
+                    live[key] = value
+        return live if len(live) == len(_EXPOSURE_KEYS) else None
+    except Exception:
+        return None
+
+
+def _liveMatches(values):
+    """True when the running capture already uses exactly these night-exposure values,
+    so restarting it would change nothing. Unreadable counts as a mismatch, so a needed
+    reload is never skipped on a guess."""
+    live = _liveNightArgs()
+    if not live or not values:
+        return False
+    try:
+        for key in _EXPOSURE_KEYS:
+            want, have = values.get(key), live.get(key)
+            if key in ("nightautoexposure", "nightautogain"):
+                if _truthy(want) != _truthy(have):
+                    return False
+            elif s.int(want) != s.int(have):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _mayOverride(state, now, reload_capture, rearm_holdoff):
+    """Whether this frame may switch the camera to the storm exposure. Two reasons not
+    to, each logged once per storm:
+      * the service would not come back from a restart whose shutdown times out;
+      * the exposure was restored only moments ago, i.e. the storm is flapping at its
+        edge, and every switch is another restart.
+    Only the exposure switch is skipped: the storm stays active and bolts are still
+    captured, at the normal exposure."""
+    reason = None
+    if reload_capture and not _restartSurvivesStopTimeout():
+        reason = "unsafe"
+    elif now - state.get("restored_at", 0.0) < rearm_holdoff:
+        reason = "holdoff"
+    if reason is None:
+        state.pop("override_skipped", None)
+        return True
+    if state.get("override_skipped") != reason:
+        state["override_skipped"] = reason
+        if reason == "unsafe":
+            s.log(1, "WARNING: lightning storm active but NOT switching the camera to the "
+                     "storm exposure: allsky.service has Restart=on-success, so a restart "
+                     "whose shutdown times out - e.g. an upload stuck on an unreachable "
+                     "remote website - leaves the camera stopped until restarted by hand. "
+                     "Bolts are still captured at the normal exposure. To enable the "
+                     "switch, see 'Service hardening' in the module README.")
+        else:
+            since = int(now - state.get("restored_at", 0.0))
+            s.log(1, f"INFO: lightning storm active again {since} s after the exposure "
+                     f"was restored - keeping the normal exposure for another "
+                     f"{int(rearm_holdoff) - since} s rather than restarting the camera "
+                     "on a flapping storm edge")
+    return False
+
+
 def _isOverride(current, expo_ms, gain, delay_ms):
     """True when the night settings already ARE this module's short-exposure override.
     Such values can never be genuine 'originals'."""
@@ -732,6 +834,7 @@ def lightning(params, event):
     min_sun_elevation = s.asfloat(params.get("min_sun_elevation", -12.0))
     reload_capture = _truthy(params.get("reload_capture", True))
     reload_min_interval = s.asfloat(params.get("reload_min_interval_sec", 300))
+    rearm_holdoff = s.asfloat(params.get("rearm_holdoff_sec", 1800))
 
     # Daytime capture with a brightness trigger is hopeless - the bright sky and drifting
     # clouds swamp any bolt (they get saved as false "sunshine bolts"). So unless
@@ -814,14 +917,19 @@ def lightning(params, event):
         s.log(1, f"INFO: lightning STORM detected ({flashes_in_window} flashes / {int(window_sec)}s)")
     elif state["active"] and (now - state.get("last_flash", 0)) > eff_cooldown:
         state["active"] = False
+        state.pop("override_skipped", None)     # next storm reports its own reason
         s.log(1, f"INFO: lightning storm ended (cooldown {int(eff_cooldown)}s elapsed"
                  + (f", weather={wx_condition}" if weather_gate else "") + ")")
 
     # --- apply / restore the short exposure to match the storm state ---------
     transitioned = False
     # ENTER lightning mode: NIGHT only - we only ever override the night exposure.
+    # _mayOverride can veto the switch (unsafe restart, or flapping); the storm itself
+    # stays active either way, and a vetoed frame falls through to the pending-reload
+    # flush below instead of starving it.
     if period == "night" and state["active"] and not state.get("saved") \
-            and not state.get("override_unknown"):
+            and not state.get("override_unknown") \
+            and _mayOverride(state, now, reload_capture, rearm_holdoff):
         transitioned = _enterLightningMode(state, expo_ms, gain, delay_ms)
         if transitioned and reload_capture:
             _requestCaptureReload(state, reload_min_interval)
@@ -831,14 +939,23 @@ def lightning(params, event):
     # Restoring the night settings from the day flow is harmless (day uses the day
     # exposure) and resets the camera as soon as the cooldown elapses.
     elif not state["active"] and (state.get("saved") or state.get("override_unknown")):
-        restored = bool(state.get("saved"))
+        saved = state.get("saved")
         _exitLightningMode(state)
         transitioned = True
+        if saved:
+            state["restored_at"] = now
         # Reload from the day flow too: capture_args.txt holds BOTH the day and the night
         # settings and is fixed for the whole service run, so a night exposure restored
-        # during the day would otherwise still not apply at dusk.
-        if restored and reload_capture:
-            _requestCaptureReload(state, reload_min_interval)
+        # during the day would otherwise still not apply at dusk. The restore always
+        # reloads when needed, even on an unhardened service: leaving the camera on the
+        # storm exposure means dark frames all night. But a restart that would change
+        # nothing is skipped - every restart is a chance for the service not to return.
+        if saved and reload_capture:
+            if _liveMatches(saved):
+                s.log(1, "INFO: lightning restored settings already match the running "
+                         "camera - no restart needed")
+            else:
+                _requestCaptureReload(state, reload_min_interval)
     elif reload_capture:
         # steady state - flush a request an earlier frame had to throttle
         _serviceCaptureReload(state, reload_min_interval)

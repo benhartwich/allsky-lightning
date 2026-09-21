@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.10.0
+
+**Fix: a storm could leave the camera stopped for the rest of the night.**
+
+- **What happened (2026-09-20).** Three camera reloads in twenty minutes at the edge of a
+  storm — storm over at 23:01, back at 23:09, over again at 23:20. The first two came
+  back; after the third, `allsky.service` ended in `failed (Result: timeout)` and stayed
+  down until restarted by hand the next morning.
+- **Why.** A reload is a full service restart. When capture exits, systemd sends SIGTERM
+  to what is left in the service and waits `TimeoutStopSec` (90 s). `upload.sh` ignores
+  SIGTERM on purpose (`trap "" SIGTERM`, inherited by `lftp`), and capture itself starts a
+  *Restarting* notification upload the moment it gets the SIGHUP. The remote website was
+  unreachable that night, so the uploads sat in `lftp` retries; the shutdown ran exactly
+  90 s, to the second, and systemd recorded `timeout`. Allsky's `Restart=on-success`
+  restarts only on a clean result. The second reload got lucky — its uploads failed
+  within 25 s instead of hanging.
+- **Switch into the storm exposure only when the service would survive it.** The module
+  reads `systemctl show -p Restart allsky` (no privileges needed) and switches only for
+  `always`, `on-failure` or `on-abnormal`. On a default install the storm is still
+  detected and bolts are still saved at the normal exposure, and the log says why once per
+  storm. The README gains a **Service hardening** section with a three-line systemd
+  drop-in (`Restart=always`) that turns the switch back on.
+- **Switch back without a restart when none is needed.** The restore compares the
+  restored values with what the running camera was actually started with
+  (`tmp/capture_args.txt`) and skips the restart when they already match. When they
+  differ it still restarts, hardened service or not: leaving the camera on the storm
+  exposure means dark frames all night.
+- **New setting "Re-arm Hold-off" (`rearm_holdoff_sec`, default 1800).** After the normal
+  exposure is restored, the switch into the storm exposure waits this long. The storm
+  itself still re-arms and bolts are still captured; only the camera restart waits, and
+  if the storm is still going when the hold-off ends, the switch happens then. With it,
+  the night of 2026-09-20 would have needed one restart instead of three.
+
 ## v0.9.0
 
 - **The storm exposure now actually reaches the camera.** Until now the module only

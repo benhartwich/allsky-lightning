@@ -90,6 +90,53 @@ Two things worth knowing:
 No elevated privileges are involved: the capture program runs as the same user as the
 module.
 
+## Service hardening
+
+**Read this before relying on the storm exposure.** A reload is a full restart of
+`allsky.service`, and whether the service comes back depends on how its *shutdown* goes.
+
+When capture exits, systemd sends SIGTERM to everything still running in the service and
+waits `TimeoutStopSec` (90 s by default). Some of that deliberately ignores SIGTERM:
+`upload.sh` runs `trap "" SIGTERM` so a transfer is never cut off, and `lftp` inherits
+the ignore. Capture also starts a *Restarting* notification upload the moment it receives
+the SIGHUP. If the remote website is unreachable, those uploads sit in `lftp` retries, the
+shutdown runs past 90 s, and systemd records the result as `timeout`.
+
+Allsky's unit uses `Restart=on-success`, which restarts **only** on a clean result. After
+a timeout the camera stays stopped until someone restarts it by hand. This happened here
+on 2026-09-20: three reloads in twenty minutes at the edge of a storm, the first two came
+back, the third stopped the camera for the rest of the night.
+
+The module therefore checks the service first, and **only switches into the storm
+exposure when the service would survive that** — `Restart=always`, `on-failure` or
+`on-abnormal`. On a default install the storm is still detected and bolts are still
+saved, just at the normal exposure; the log says why, once per storm. Switching *back*
+to the normal exposure always happens when the camera needs it, because leaving it on the
+storm exposure would mean dark frames all night — and it is skipped entirely when the
+running camera already has the restored values.
+
+To enable the storm exposure, make systemd restart the service after a timed-out stop
+as well. This adds a drop-in; it does not edit Allsky's own unit file, so an Allsky
+upgrade leaves it in place:
+
+```bash
+sudo mkdir -p /etc/systemd/system/allsky.service.d
+printf '[Service]\nRestart=always\n' | sudo tee /etc/systemd/system/allsky.service.d/restart-always.conf
+sudo systemctl daemon-reload
+systemctl show -p Restart --value allsky      # should print: always
+```
+
+Nothing else about the service changes. Exit codes 100 and 101, which Allsky uses for
+errors it wants to stay stopped, are still honoured through the unit's existing
+`RestartPreventExitStatus=100 101`, and stopping Allsky yourself (WebUI or
+`systemctl stop`) never triggers a restart. What does change: after a stop that times
+out, the camera is back after the 90 s timeout plus two seconds, instead of staying off.
+
+To undo it: `sudo rm /etc/systemd/system/allsky.service.d/restart-always.conf && sudo systemctl daemon-reload`.
+
+The module reads the policy on every storm, so the drop-in takes effect without touching
+the module.
+
 ## Daytime
 
 The module can also run on the day flow (`day_enabled`). A daytime bolt against a bright
@@ -177,8 +224,9 @@ sky to analyse, black = trees/horizon.
 | `weather_gate` | cross-check Open-Meteo: block arming (day + night) when the sky is calm + reset sooner after a storm |
 | `weather_cache_sec` / `weather_clear_cooldown_sec` | how often the weather API is queried / the shortened cooldown used when the sky is confidently calm |
 | `min_sun_elevation` | never arm while the sun is above this elevation (deg; `-12` = end of nautical twilight, the default; `-6` = civil twilight) |
-| `reload_capture` | push the exposure to the **running** camera via SIGHUP (on by default); without it a change only applies at the next Allsky restart |
+| `reload_capture` | push the exposure to the **running** camera via SIGHUP (on by default); without it a change only applies at the next Allsky restart. Switching *into* the storm exposure additionally needs a hardened service — see [Service hardening](#service-hardening) |
 | `reload_min_interval_sec` | shortest gap between two camera reloads; a throttled reload stays pending rather than being dropped |
+| `rearm_holdoff_sec` | after the normal exposure is restored, wait this long before switching to the storm exposure again (default 1800). The storm still re-arms and bolts are still saved; only the camera restart waits |
 
 ## Honest limitations
 
