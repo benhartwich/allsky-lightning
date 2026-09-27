@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.11.0
+
+**Fix: a weather-service hiccup armed the storm mode on clear moonlit nights, for hours.**
+
+- **What happened.**
+  - On 2026-09-26 at 21:07, Open-Meteo answered one request with `503 Service Unavailable`.
+    The gate failed open, and in the same second the moonlit clouds, which cause a "flash"
+    on nearly every frame, armed the storm mode.
+  - The camera ran on the 2 s storm exposure until 02:10 on a clear night.
+  - The same happened on 24/25 September from 20:04 to 04:45, and on the night of
+    21/22 September. There, dark frames were then deleted as bad images.
+  - The night reports show 220–400 such cloud "flashes" per night.
+- **A failed lookup keeps the last good answer for up to an hour.** Open-Meteo fails a few
+  times a week (503, TLS handshake timeouts). One error no longer opens the gate. The gate
+  still fails open when there has been no good answer for an hour, or no location, so it
+  can never leave the camera stuck.
+- **A calm sky ends the storm.** If the weather service has reported a calm sky (dry/fog)
+  for longer than *Weather Clear Cooldown*, the storm ends even while "flashes" continue.
+  Drifting moonlit clouds on the short exposure never give a flash-free cooldown, so
+  before this a storm armed by mistake could last all night. A real storm never reads as
+  calm.
+- **Tested** with the module's real `lightning()` against a replay of each case:
+
+  | Case | v0.10.0 | v0.11.0 |
+  |---|---|---|
+  | 26 Sept: dry, one 503, a cloud "flash" on every frame | armed from the 503 on, never ended, camera left on 2 s | never armed |
+  | Real storm (thunderstorm code with flashes, then calm) | armed on 41 frames | identical |
+  | Rain arms, then dry, but "flashes" continue | armed to the end | ends 4 frames after it turns dry |
+  | No weather data at all | fail-open, arms | unchanged |
+
 ## v0.10.0
 
 **Fix: a storm could leave the camera stopped for the rest of the night.**

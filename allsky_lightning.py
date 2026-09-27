@@ -55,7 +55,7 @@ import numpy as np
 metaData = {
     "name": "Lightning Capture",
     "description": "Detects thunderstorms from brightness transients and switches to short exposures to capture crisp lightning bolts",
-    "version": "v0.10.0",
+    "version": "v0.11.0",
     "events": [
         "day",
         "night"
@@ -446,22 +446,32 @@ def _sunElevation(lat, lon, t_epoch):
         return None
 
 
+WEATHER_STALE_OK_SEC = 3600   # a failed lookup keeps using the last good answer this long
+
+
 def _getWeatherCondition(lat, lon, cache_sec):
     """Current sky 'condition' at the site from Open-Meteo (free, no key, worldwide),
     cached in ALLSKY_TMP so the API is hit at most every cache_sec.
 
-    FAIL-OPEN: on any error / missing location it returns None, and every caller
-    treats None as 'no weather info' (never blocks arming, never shortens the
-    cooldown). The weather gate can therefore never leave the camera stuck.
+    A failed lookup (Open-Meteo answers 503 or times out a few times a week) keeps
+    using the last good answer for up to WEATHER_STALE_OK_SEC: one server hiccup must
+    not open the gate. On 2026-09-26 a single 503 at 21:07 did exactly that, and the
+    moonlit clouds armed the storm mode for 5 hours on a clear night.
+
+    FAIL-OPEN beyond that: with no good answer for an hour, or no location, it returns
+    None, and every caller treats None as 'no weather info' (never blocks arming,
+    never shortens the cooldown). The weather gate can therefore never leave the
+    camera stuck.
 
     Returns a coarse condition string (dry/fog/rain/snow/thunderstorm) or None."""
+    cache = {}
     try:
         if os.path.exists(WEATHER_FILE):
-            c = json.load(open(WEATHER_FILE))
-            if time.time() - c.get("ts", 0) <= cache_sec:
-                return c.get("condition")
+            cache = json.load(open(WEATHER_FILE))
+            if time.time() - cache.get("ts", 0) <= cache_sec:
+                return cache.get("condition")
     except Exception:
-        pass
+        cache = {}
     if lat is None or lon is None:
         return None
     condition = None
@@ -474,8 +484,13 @@ def _getWeatherCondition(lat, lon, cache_sec):
     except Exception as ex:
         s.log(1, f"WARNING: lightning weather lookup failed: {ex}")
         condition = None
+    good = cache.get("good")
+    if condition is not None:
+        good = {"ts": time.time(), "condition": condition}
+    elif good and time.time() - good.get("ts", 0) <= WEATHER_STALE_OK_SEC:
+        condition = good.get("condition")          # bridge the outage with the last answer
     try:  # cache even a None so a flapping network doesn't hammer the API
-        json.dump({"ts": time.time(), "condition": condition}, open(WEATHER_FILE, "w"))
+        json.dump({"ts": time.time(), "condition": condition, "good": good}, open(WEATHER_FILE, "w"))
     except Exception:
         pass
     return condition
@@ -910,6 +925,8 @@ def lightning(params, event):
     # camera resets much sooner once a storm has clearly moved on.
     eff_cooldown = weather_clear_cooldown_sec if (weather_gate and wx_calm) else cooldown_sec
 
+    if not (state["active"] and weather_gate and wx_calm):
+        state.pop("calm_since", None)
     just_armed = False
     if not state["active"] and flashes_in_window >= flashes_to_arm and not arm_blocked:
         state["active"] = True
@@ -918,8 +935,21 @@ def lightning(params, event):
     elif state["active"] and (now - state.get("last_flash", 0)) > eff_cooldown:
         state["active"] = False
         state.pop("override_skipped", None)     # next storm reports its own reason
+        state.pop("calm_since", None)
         s.log(1, f"INFO: lightning storm ended (cooldown {int(eff_cooldown)}s elapsed"
                  + (f", weather={wx_condition}" if weather_gate else "") + ")")
+    elif state["active"] and weather_gate and wx_calm \
+            and now - state.setdefault("calm_since", now) > weather_clear_cooldown_sec:
+        # Weather gate, effect 3: the weather service has reported a calm sky (dry/fog)
+        # for longer than the clear cooldown, so end the storm even though "flashes"
+        # keep coming. Drifting moonlit clouds produce a flash on nearly every short
+        # exposure, so waiting for a flash-free cooldown can take all night (5 h on
+        # 2026-09-26). A real storm never reads as calm.
+        state["active"] = False
+        state.pop("override_skipped", None)
+        state.pop("calm_since", None)
+        s.log(1, f"INFO: lightning storm ended (weather {wx_condition} for "
+                 f"{int(weather_clear_cooldown_sec)}s although flashes continue)")
 
     # --- apply / restore the short exposure to match the storm state ---------
     transitioned = False
