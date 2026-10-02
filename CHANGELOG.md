@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.11.1
+
+**Fix: the sun and weather gates were skipped on the frame that armed the storm mode.**
+
+- The gates were only checked on a frame that was itself a flash. A quiet frame right
+  after two flashes still had both in the window, so it armed the storm mode without any
+  check: at dawn (2026-10-02 06:25, sun at -7°, guard at -12°) and on dry nights alike.
+- The gates are now also checked whenever the window holds enough flashes to arm.
+- Tested against `lightning()` with flash/quiet frame sequences: dawn and dry nights no
+  longer arm; a night with no weather answer still arms on the second flash.
+
 ## v0.11.0
 
 **Fix: a weather-service hiccup armed the storm mode on clear moonlit nights, for hours.**

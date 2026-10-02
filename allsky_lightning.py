@@ -55,7 +55,7 @@ import numpy as np
 metaData = {
     "name": "Lightning Capture",
     "description": "Detects thunderstorms from brightness transients and switches to short exposures to capture crisp lightning bolts",
-    "version": "v0.11.0",
+    "version": "v0.11.1",
     "events": [
         "day",
         "night"
@@ -889,11 +889,15 @@ def lightning(params, event):
 
     # --- optional weather gate (Bright Sky / DWD, opt-in, fail-open) ----------
     # Only look up the weather when it can actually change a decision: a flash just
-    # happened (possible arming) or we are armed (possible cooldown). The result is
-    # cached so the API is hit at most every weather_cache_sec.
+    # happened or the window holds enough flashes (possible arming), or we are armed
+    # (possible cooldown). The result is cached so the API is hit at most every
+    # weather_cache_sec.
     wx_condition = None
     wx_calm = False   # sky is confidently calm/clear per the weather service
-    if weather_gate and (is_flash or state["active"]):
+    # The gates must also be checked on a quiet frame that follows enough flashes:
+    # the window still holds them, so that frame can arm too.
+    may_arm = not state["active"] and flashes_in_window >= flashes_to_arm
+    if weather_gate and (is_flash or state["active"] or may_arm):
         lat = _parseLatLon(s.getSetting("latitude"))
         lon = _parseLatLon(s.getSetting("longitude"))
         wx_condition = _getWeatherCondition(lat, lon, weather_cache_sec)
@@ -907,7 +911,7 @@ def lightning(params, event):
     # twilight). This backstops the weather gate for the case where the weather lookup is
     # unavailable/stale (which fails open). Unknown location -> None -> never blocks.
     sun_elev = None
-    if is_flash or state["active"]:
+    if is_flash or state["active"] or may_arm:
         sun_elev = _sunElevation(_parseLatLon(s.getSetting("latitude")),
                                  _parseLatLon(s.getSetting("longitude")), now)
     too_bright = sun_elev is not None and sun_elev > min_sun_elevation
